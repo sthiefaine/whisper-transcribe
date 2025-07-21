@@ -39,9 +39,14 @@ MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB max
 # Dictionnaire global pour stocker l'état des tâches asynchrones
 ASYNC_TASKS = {}
 
+# Compteur global pour les transcriptions actives
+ACTIVE_TRANSCRIPTIONS = 0
+MAX_CONCURRENT_TRANSCRIPTIONS = 1
+
 # Fonction worker pour la transcription asynchrone
 
-def async_transcription_worker(task_id, audio_url, language, model, output_format='txt'):
+def async_transcription_worker(task_id, audio_url, language, model, output_format='txt', prompt=None):
+    global ACTIVE_TRANSCRIPTIONS
     try:
         ASYNC_TASKS[task_id]['status'] = 'processing'
         ASYNC_TASKS[task_id]['progress'] = 0
@@ -59,19 +64,15 @@ def async_transcription_worker(task_id, audio_url, language, model, output_forma
         model_path = f"{WHISPER_PATH}/models/ggml-{model}.bin"
         if not os.path.exists(model_path):
             model_path = MODEL_PATH
-        cmd = [
-            f"{WHISPER_PATH}/build/bin/whisper-cli",
-            "-m", model_path,
-            "-f", temp_file_path,
-            "-l", language,
-            f"-o{output_format}",
-            "--print-progress",
-            "--debug-mode",
-            "-t", "8",
-            "-p", "2"
-        ]
-        if output_format == 'txt':
-            cmd.append('--no-timestamps')
+        cmd = build_whisper_cmd(
+            WHISPER_PATH,
+            model_path,
+            temp_file_path,
+            language,
+            output_format,
+            prompt=prompt,
+            no_timestamps=(output_format == "txt")
+        )
         import subprocess
         process = subprocess.Popen(
             cmd,
@@ -131,6 +132,8 @@ def async_transcription_worker(task_id, audio_url, language, model, output_forma
     except Exception as e:
         ASYNC_TASKS[task_id]['status'] = 'error'
         ASYNC_TASKS[task_id]['result'] = str(e)
+    finally:
+        ACTIVE_TRANSCRIPTIONS -= 1
 
 # Fonction utilitaire pour nettoyer les fichiers de plus de 24h
 
@@ -147,6 +150,30 @@ def cleanup_old_transcriptions(output_dir="/var/log/whisper", max_age_hours=24):
                     os.remove(file_path)
                 except Exception as e:
                     logger.warning(f"Impossible de supprimer {file_path}: {e}")
+
+# Fonction utilitaire pour construire la commande whisper-cli
+
+def build_whisper_cmd(
+    whisper_path,
+    model_path,
+    temp_file_path,
+    language,
+    output_format,
+    prompt=None,
+    no_timestamps=False
+):
+    cmd = [
+        f"{whisper_path}/build/bin/whisper-cli",
+        "-m", model_path,
+        "-f", temp_file_path,
+        "-l", language,
+        f"-o{output_format}",
+    ]
+    if no_timestamps and output_format == "txt":
+        cmd.append("--no-timestamps")
+    if prompt:
+        cmd += ["--prompt", prompt]
+    return cmd
 
 @app.route('/health', methods=['GET'])
 def health():
@@ -176,10 +203,15 @@ def list_models():
 
 @app.route('/transcribe', methods=['POST'])
 def transcribe():
-    """Transcrire un fichier audio"""
+    global ACTIVE_TRANSCRIPTIONS
     start_time = time.time()
     
+    # Vérifier si une transcription est déjà en cours
+    if ACTIVE_TRANSCRIPTIONS >= MAX_CONCURRENT_TRANSCRIPTIONS:
+        return jsonify({"error": "Transcription en cours, veuillez réessayer dans quelques minutes"}), 429
+    
     try:
+        ACTIVE_TRANSCRIPTIONS += 1
         data = request.get_json()
         if not data:
             return jsonify({"error": "Données JSON requises"}), 400
@@ -218,19 +250,15 @@ def transcribe():
         if not os.path.exists(model_path):
             model_path = MODEL_PATH  # Fallback au modèle par défaut
 
-        cmd = [
-            f"{WHISPER_PATH}/build/bin/whisper-cli",
-            "-m", model_path,
-            "-f", temp_file_path,
-            "-l", language,
-            f"-o{output_format}",
-            "--print-progress",
-            "--debug-mode",
-            "-t", "8",  # Plus de threads
-            "-p", "2"   # Plus de processeurs
-        ]
-        if output_format == 'txt':
-            cmd.append('--no-timestamps')
+        cmd = build_whisper_cmd(
+            WHISPER_PATH,
+            model_path,
+            temp_file_path,
+            language,
+            output_format,
+            prompt=data.get('prompt') if 'data' in locals() and data else None,
+            no_timestamps=(output_format == "txt")
+        )
         
         logger.info(f"Exécution: {' '.join(cmd)}")
         
@@ -391,13 +419,20 @@ def transcribe():
     except Exception as e:
         logger.error(f"Erreur inattendue: {e}")
         return jsonify({"error": str(e)}), 500
+    finally:
+        ACTIVE_TRANSCRIPTIONS -= 1
 
 @app.route('/transcribe/file', methods=['POST'])
 def transcribe_file():
-    """Transcrire un fichier audio uploadé"""
+    global ACTIVE_TRANSCRIPTIONS
     start_time = time.time()
     
+    # Vérifier si une transcription est déjà en cours
+    if ACTIVE_TRANSCRIPTIONS >= MAX_CONCURRENT_TRANSCRIPTIONS:
+        return jsonify({"error": "Transcription en cours, veuillez réessayer dans quelques minutes"}), 429
+    
     try:
+        ACTIVE_TRANSCRIPTIONS += 1
         # Vérifier qu'un fichier a été envoyé
         if 'audio_file' not in request.files:
             return jsonify({"error": "Aucun fichier audio fourni"}), 400
@@ -428,19 +463,15 @@ def transcribe_file():
         if not os.path.exists(model_path):
             model_path = MODEL_PATH  # Fallback au modèle par défaut
 
-        cmd = [
-            f"{WHISPER_PATH}/build/bin/whisper-cli",
-            "-m", model_path,
-            "-f", temp_file_path,
-            "-l", language,
-            f"-o{output_format}",
-            "--print-progress",
-            "--debug-mode",
-            "-t", "8",  # Plus de threads
-            "-p", "2"   # Plus de processeurs
-        ]
-        if output_format == 'txt':
-            cmd.append('--no-timestamps')
+        cmd = build_whisper_cmd(
+            WHISPER_PATH,
+            model_path,
+            temp_file_path,
+            language,
+            output_format,
+            prompt=request.form.get('prompt'),
+            no_timestamps=(output_format == "txt")
+        )
         
         logger.info(f"Exécution: {' '.join(cmd)}")
         
@@ -606,6 +637,8 @@ def transcribe_file():
     except Exception as e:
         logger.error(f"Erreur inattendue: {e}")
         return jsonify({"error": str(e)}), 500
+    finally:
+        ACTIVE_TRANSCRIPTIONS -= 1
 
 @app.route('/transcribe/batch', methods=['POST'])
 def transcribe_batch():
@@ -650,6 +683,12 @@ def transcribe_single(audio_url):
 
 @app.route('/transcribe-async', methods=['POST'])
 def transcribe_async():
+    global ACTIVE_TRANSCRIPTIONS
+    
+    # Vérifier si une transcription est déjà en cours
+    if ACTIVE_TRANSCRIPTIONS >= MAX_CONCURRENT_TRANSCRIPTIONS:
+        return jsonify({"error": "Transcription en cours, veuillez réessayer dans quelques minutes"}), 429
+    
     data = request.get_json()
     if not data:
         return jsonify({"error": "Données JSON requises"}), 400
@@ -657,12 +696,14 @@ def transcribe_async():
     language = data.get('language', 'fr')
     model = data.get('model', 'base')
     output_format = data.get('output_format', 'txt').lower()
+    prompt = data.get('prompt')
     if not audio_url:
         return jsonify({"error": "audio_url requis"}), 400
     import uuid
     task_id = str(uuid.uuid4())
     ASYNC_TASKS[task_id] = {'status': 'pending', 'result': None, 'progress': 0}
-    thread = threading.Thread(target=async_transcription_worker, args=(task_id, audio_url, language, model, output_format))
+    ACTIVE_TRANSCRIPTIONS += 1
+    thread = threading.Thread(target=async_transcription_worker, args=(task_id, audio_url, language, model, output_format, prompt))
     thread.start()
     return jsonify({"task_id": task_id, "status_url": f"/transcription-status/{task_id}"})
 
