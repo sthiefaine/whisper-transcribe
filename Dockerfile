@@ -3,7 +3,8 @@ FROM ubuntu:22.04
 # Variables d'environnement
 ENV DEBIAN_FRONTEND=noninteractive
 ENV WHISPER_PATH=/opt/whisper.cpp
-ENV MODEL_PATH=${WHISPER_PATH}/models/ggml-base.bin
+ENV MODEL_NAME=large-v3-turbo-q8_0
+ENV MODEL_PATH=${WHISPER_PATH}/models/ggml-${MODEL_NAME}.bin
 
 # Installation des dépendances système
 RUN apt-get update && apt-get install -y \
@@ -18,24 +19,24 @@ RUN apt-get update && apt-get install -y \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# Cloner Whisper.cpp
+# Cloner whisper.cpp
 RUN git clone https://github.com/ggerganov/whisper.cpp.git ${WHISPER_PATH}
 
-# Compiler Whisper.cpp avec vérification
+# Compiler whisper.cpp
 WORKDIR ${WHISPER_PATH}
 RUN make && \
     ls -la build/bin/ && \
     echo "✅ Whisper.cpp compilé avec succès"
 
-# Télécharger le modèle français (base) avec retry
+# Télécharger le modèle large-v3-turbo-q8_0 avec retry
 RUN for i in 1 2 3; do \
-        echo "Tentative $i de téléchargement du modèle base..."; \
-        bash ./models/download-ggml-model.sh base && break; \
+        echo "Tentative $i de téléchargement du modèle ${MODEL_NAME}..."; \
+        bash ./models/download-ggml-model.sh ${MODEL_NAME} && break; \
         echo "Échec du téléchargement, nouvelle tentative..."; \
         sleep 5; \
     done
 
-# Créer l'environnement Python
+# Créer un environnement virtuel Python
 RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
@@ -43,12 +44,15 @@ ENV PATH="/opt/venv/bin:$PATH"
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copier le serveur
+# Copier le script serveur
 COPY server.py .
 
 # Créer un utilisateur non-root
 RUN useradd -m -u 1000 whisper && \
     chown -R whisper:whisper ${WHISPER_PATH}
+
+# Créer le dossier de logs avec les bons droits
+RUN mkdir -p /var/log/whisper && chmod 777 /var/log/whisper
 
 USER whisper
 
@@ -57,4 +61,4 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8080/health || exit 1
 
-CMD ["python3", "server.py"] 
+CMD ["python3", "server.py"]
