@@ -17,6 +17,9 @@ from flask_cors import CORS
 from datetime import datetime
 import uuid
 from flask import send_from_directory
+import shutil
+import threading
+import re
 
 # Configuration du logging
 logging.basicConfig(
@@ -32,6 +35,118 @@ CORS(app, origins=["*"])  # En production, spécifiez vos domaines
 WHISPER_PATH = "/opt/whisper.cpp"
 MODEL_PATH = f"{WHISPER_PATH}/models/ggml-base.bin"
 MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB max
+
+# Dictionnaire global pour stocker l'état des tâches asynchrones
+ASYNC_TASKS = {}
+
+# Fonction worker pour la transcription asynchrone
+
+def async_transcription_worker(task_id, audio_url, language, model, output_format='txt'):
+    try:
+        ASYNC_TASKS[task_id]['status'] = 'processing'
+        ASYNC_TASKS[task_id]['progress'] = 0
+        # Télécharger l'audio (copie de la logique existante)
+        import tempfile, requests, os, uuid, urllib.parse, re
+        with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as temp_file:
+            response = requests.get(audio_url, stream=True, timeout=30)
+            response.raise_for_status()
+            file_size = 0
+            for chunk in response.iter_content(chunk_size=8192):
+                temp_file.write(chunk)
+                file_size += len(chunk)
+            temp_file_path = temp_file.name
+        # Construire la commande Whisper
+        model_path = f"{WHISPER_PATH}/models/ggml-{model}.bin"
+        if not os.path.exists(model_path):
+            model_path = MODEL_PATH
+        cmd = [
+            f"{WHISPER_PATH}/build/bin/whisper-cli",
+            "-m", model_path,
+            "-f", temp_file_path,
+            "-l", language,
+            f"-o{output_format}",
+            "--print-progress",
+            "--debug-mode",
+            "-t", "8",
+            "-p", "2"
+        ]
+        if output_format == 'txt':
+            cmd.append('--no-timestamps')
+        import subprocess
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=WHISPER_PATH,
+            bufsize=1,
+            universal_newlines=True
+        )
+        # Lire la sortie en temps réel pour la progression
+        percent = 0
+        progress_re = re.compile(r'(\d{1,3})%')
+        while True:
+            line = process.stdout.readline() if process.stdout else None
+            if not line:
+                if process.poll() is not None:
+                    break
+                continue
+            # Chercher un pourcentage dans la ligne
+            match = progress_re.search(line)
+            if match:
+                percent = int(match.group(1))
+                ASYNC_TASKS[task_id]['progress'] = percent
+        process.communicate()
+        os.unlink(temp_file_path)
+        # Chercher le fichier de sortie
+        parsed_url = urllib.parse.urlparse(audio_url)
+        audio_base = os.path.splitext(os.path.basename(parsed_url.path))[0]
+        transcription_id = str(uuid.uuid4())
+        output_dir = "/var/log/whisper"
+        os.makedirs(output_dir, exist_ok=True)
+        output_path = os.path.join(output_dir, f"{audio_base}__{transcription_id}.{output_format}")
+        # Le whisper-cli sort le .txt dans le dossier courant
+        whisper_output = os.path.join(WHISPER_PATH, os.path.basename(temp_file_path).replace('.mp3', f'.{output_format}'))
+        transcription = None
+        if os.path.exists(whisper_output):
+            with open(whisper_output, 'r', encoding='utf-8') as f:
+                transcription = f.read().strip()
+            os.unlink(whisper_output)
+        elif process.stdout and process.stdout:
+            # Si le fichier n'existe pas mais qu'on a du texte sur STDOUT, l'utiliser
+            process.stdout.seek(0)
+            transcription = process.stdout.read().strip()
+        elif process.stderr and process.stderr:
+            process.stderr.seek(0)
+            transcription = process.stderr.read().strip()
+        if transcription:
+            with open(output_path, "w", encoding="utf-8") as f:
+                f.write(transcription)
+            ASYNC_TASKS[task_id]['status'] = 'done'
+            ASYNC_TASKS[task_id]['progress'] = 100
+            ASYNC_TASKS[task_id]['result'] = f"/transcriptions/{audio_base}__{transcription_id}.{output_format}"
+        else:
+            ASYNC_TASKS[task_id]['status'] = 'error'
+            ASYNC_TASKS[task_id]['result'] = "Fichier de sortie non trouvé et STDOUT vide"
+    except Exception as e:
+        ASYNC_TASKS[task_id]['status'] = 'error'
+        ASYNC_TASKS[task_id]['result'] = str(e)
+
+# Fonction utilitaire pour nettoyer les fichiers de plus de 24h
+
+def cleanup_old_transcriptions(output_dir="/var/log/whisper", max_age_hours=24):
+    now = time.time()
+    if not os.path.exists(output_dir):
+        return
+    for filename in os.listdir(output_dir):
+        file_path = os.path.join(output_dir, filename)
+        if os.path.isfile(file_path):
+            file_age = now - os.path.getmtime(file_path)
+            if file_age > max_age_hours * 3600:
+                try:
+                    os.remove(file_path)
+                except Exception as e:
+                    logger.warning(f"Impossible de supprimer {file_path}: {e}")
 
 @app.route('/health', methods=['GET'])
 def health():
@@ -72,6 +187,7 @@ def transcribe():
         audio_url = data.get('audio_url')
         language = data.get('language', 'fr')
         model = data.get('model', 'base')
+        output_format = data.get('output_format', 'txt').lower()
         
         if not audio_url:
             return jsonify({"error": "audio_url requis"}), 400
@@ -107,13 +223,14 @@ def transcribe():
             "-m", model_path,
             "-f", temp_file_path,
             "-l", language,
-            "-otxt",
-            "--no-timestamps",
+            f"-o{output_format}",
             "--print-progress",
             "--debug-mode",
             "-t", "8",  # Plus de threads
             "-p", "2"   # Plus de processeurs
         ]
+        if output_format == 'txt':
+            cmd.append('--no-timestamps')
         
         logger.info(f"Exécution: {' '.join(cmd)}")
         
@@ -212,43 +329,41 @@ def transcribe():
             return jsonify({"error": f"Erreur transcription: {result.stderr}"}), 500
 
         # Utiliser la sortie STDOUT de Whisper directement
-        if result.stdout and result.stdout.strip():
+        transcription = None
+        base_filename = os.path.basename(temp_file_path)
+        ext = f'.{output_format}'
+        output_filename = base_filename.replace('.mp3', ext)
+        output_file = os.path.join(WHISPER_PATH, output_filename)
+        logger.info(f"Recherche du fichier de sortie: {output_file}")
+        logger.info(f"Fichier existe: {os.path.exists(output_file)}")
+        if os.path.exists(output_file):
+            with open(output_file, 'r', encoding='utf-8') as f:
+                transcription = f.read().strip()
+            os.unlink(output_file)
+        elif result.stdout and result.stdout.strip():
             transcription = result.stdout.strip()
-            logger.info(f"Transcription récupérée depuis STDOUT: {len(transcription)} caractères")
         else:
-            # Fallback: chercher le fichier de sortie
-            base_filename = os.path.basename(temp_file_path)
-            output_filename = base_filename.replace('.mp3', '.txt')
-            output_file = os.path.join(WHISPER_PATH, output_filename)
-            
-            logger.info(f"Recherche du fichier de sortie: {output_file}")
-            logger.info(f"Fichier existe: {os.path.exists(output_file)}")
-            
-            # Lister les fichiers dans le répertoire WHISPER_PATH pour debug
-            if os.path.exists(WHISPER_PATH):
-                files_in_dir = os.listdir(WHISPER_PATH)
-                logger.info(f"Fichiers dans {WHISPER_PATH}: {files_in_dir}")
-            
-            if os.path.exists(output_file):
-                with open(output_file, 'r', encoding='utf-8') as f:
-                    transcription = f.read().strip()
-                os.unlink(output_file)
-            else:
-                return jsonify({"error": "Fichier de sortie non trouvé et STDOUT vide"}), 500
+            return jsonify({"error": "Fichier de sortie non trouvé et STDOUT vide"}), 500
 
         processing_time = time.time() - start_time
         
         logger.info(f"Transcription terminée en {processing_time:.2f}s")
 
+        # Nettoyer les anciens fichiers
+        cleanup_old_transcriptions()
         # Si la transcription est longue, la stocker et renvoyer une URL
         if len(transcription) > 2000:
+            # Extraire le nom de base du fichier audio depuis l'URL
+            import urllib.parse
+            parsed_url = urllib.parse.urlparse(audio_url)
+            audio_base = os.path.splitext(os.path.basename(parsed_url.path))[0]
             transcription_id = str(uuid.uuid4())
             output_dir = "/var/log/whisper"
             os.makedirs(output_dir, exist_ok=True)
-            output_path = os.path.join(output_dir, f"{transcription_id}.txt")
+            output_path = os.path.join(output_dir, f"{audio_base}__{transcription_id}.{output_format}")
             with open(output_path, "w", encoding="utf-8") as f:
                 f.write(transcription)
-            transcription_url = request.url_root.rstrip('/') + f"/transcriptions/{transcription_id}.txt"
+            transcription_url = request.url_root.rstrip('/') + f"/transcriptions/{audio_base}__{transcription_id}.{output_format}"
             return jsonify({
                 "success": True,
                 "transcription_url": transcription_url,
@@ -294,6 +409,7 @@ def transcribe_file():
         # Récupérer les paramètres
         language = request.form.get('language', 'fr')
         model = request.form.get('model', 'base')
+        output_format = request.form.get('output_format', 'txt').lower()
         
         logger.info(f"Début transcription fichier: {audio_file.filename}")
 
@@ -317,13 +433,14 @@ def transcribe_file():
             "-m", model_path,
             "-f", temp_file_path,
             "-l", language,
-            "-otxt",
-            "--no-timestamps",
+            f"-o{output_format}",
             "--print-progress",
             "--debug-mode",
             "-t", "8",  # Plus de threads
             "-p", "2"   # Plus de processeurs
         ]
+        if output_format == 'txt':
+            cmd.append('--no-timestamps')
         
         logger.info(f"Exécution: {' '.join(cmd)}")
         
@@ -422,13 +539,15 @@ def transcribe_file():
             return jsonify({"error": f"Erreur transcription: {result.stderr}"}), 500
 
         # Utiliser la sortie STDOUT de Whisper directement
-        if result.stdout and result.stdout.strip():
+        transcription = None
+        if result.stdout and result.stdout.strip() and output_format == 'txt':
             transcription = result.stdout.strip()
             logger.info(f"Transcription récupérée depuis STDOUT: {len(transcription)} caractères")
         else:
             # Fallback: chercher le fichier de sortie
             base_filename = os.path.basename(temp_file_path)
-            output_filename = base_filename.replace('.mp3', '.txt')
+            ext = f'.{output_format}'
+            output_filename = base_filename.replace('.mp3', ext)
             output_file = os.path.join(WHISPER_PATH, output_filename)
             
             logger.info(f"Recherche du fichier de sortie: {output_file}")
@@ -449,15 +568,19 @@ def transcribe_file():
         processing_time = time.time() - start_time
         logger.info(f"Transcription terminée en {processing_time:.2f}s")
 
+        # Nettoyer les anciens fichiers
+        cleanup_old_transcriptions()
         # Si la transcription est longue, la stocker et renvoyer une URL
         if len(transcription) > 2000:
+            audio_filename = audio_file.filename or "audio"
+            audio_base = os.path.splitext(secure_filename(audio_filename))[0]
             transcription_id = str(uuid.uuid4())
             output_dir = "/var/log/whisper"
             os.makedirs(output_dir, exist_ok=True)
-            output_path = os.path.join(output_dir, f"{transcription_id}.txt")
+            output_path = os.path.join(output_dir, f"{audio_base}__{transcription_id}.{output_format}")
             with open(output_path, "w", encoding="utf-8") as f:
                 f.write(transcription)
-            transcription_url = request.url_root.rstrip('/') + f"/transcriptions/{transcription_id}.txt"
+            transcription_url = request.url_root.rstrip('/') + f"/transcriptions/{audio_base}__{transcription_id}.{output_format}"
             return jsonify({
                 "success": True,
                 "transcription_url": transcription_url,
@@ -525,10 +648,35 @@ def transcribe_single(audio_url):
     # Logique de transcription (simplifiée pour l'exemple)
     pass
 
-@app.route('/transcriptions/<transcription_id>.txt', methods=['GET'])
-def get_transcription_file(transcription_id):
+@app.route('/transcribe-async', methods=['POST'])
+def transcribe_async():
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "Données JSON requises"}), 400
+    audio_url = data.get('audio_url')
+    language = data.get('language', 'fr')
+    model = data.get('model', 'base')
+    output_format = data.get('output_format', 'txt').lower()
+    if not audio_url:
+        return jsonify({"error": "audio_url requis"}), 400
+    import uuid
+    task_id = str(uuid.uuid4())
+    ASYNC_TASKS[task_id] = {'status': 'pending', 'result': None, 'progress': 0}
+    thread = threading.Thread(target=async_transcription_worker, args=(task_id, audio_url, language, model, output_format))
+    thread.start()
+    return jsonify({"task_id": task_id, "status_url": f"/transcription-status/{task_id}"})
+
+@app.route('/transcription-status/<task_id>', methods=['GET'])
+def transcription_status(task_id):
+    task = ASYNC_TASKS.get(task_id)
+    if not task:
+        return jsonify({"error": "Tâche inconnue"}), 404
+    return jsonify({"status": task['status'], "progress": task.get('progress', 0), "result": task['result']})
+
+@app.route('/transcriptions/<path:transcription_file>', methods=['GET'])
+def get_transcription_file(transcription_file):
     output_dir = "/var/log/whisper"
-    return send_from_directory(output_dir, f"{transcription_id}.txt", as_attachment=True)
+    return send_from_directory(output_dir, transcription_file, as_attachment=True)
 
 if __name__ == '__main__':
     # Vérifier que le modèle existe

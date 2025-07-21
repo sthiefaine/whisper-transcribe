@@ -319,3 +319,93 @@ curl -X POST http://localhost:8080/transcribe/file \
   ```bash
   docker-compose exec whisper-api ls /opt/whisper.cpp/models/
   ``` 
+
+## Gestion asynchrone des transcriptions (proposition pour évolution future)
+
+### Objectif
+Permettre de traiter des fichiers audio très longs sans risque de timeout HTTP, en lançant la transcription en tâche de fond et en permettant au client de suivre l’avancement puis de récupérer le résultat.
+
+### Principe général
+1. **POST `/transcribe-async`**
+   - Le client envoie un fichier audio ou une URL.
+   - Le serveur crée une tâche asynchrone (thread ou process Python).
+   - Le serveur répond immédiatement avec un `task_id` unique.
+
+2. **GET `/transcription-status/<task_id>`**
+   - Le client interroge l’état de la tâche (`pending`, `processing`, `done`, `error`).
+   - L’état est stocké en mémoire (dictionnaire partagé) ou dans un petit fichier JSON.
+
+3. **GET `/transcriptions/<fichier>.txt`**
+   - Quand la tâche est terminée, le client peut télécharger la transcription comme aujourd’hui.
+
+### Exemple de logique côté serveur (pseudo-code)
+
+```python
+# Dictionnaire global pour stocker l’état des tâches
+TASKS = {}
+
+@app.route('/transcribe-async', methods=['POST'])
+def transcribe_async():
+    # 1. Générer un task_id unique
+    # 2. Stocker l’état initial (pending)
+    # 3. Lancer un thread/process qui exécute la transcription et met à jour l’état
+    # 4. Retourner le task_id
+    pass
+
+@app.route('/transcription-status/<task_id>', methods=['GET'])
+def transcription_status(task_id):
+    # Retourner l’état de la tâche (pending, processing, done, error)
+    pass
+```
+
+### Avantages
+- Plus de timeout HTTP, même pour des fichiers très longs.
+- Facile à intégrer à l’API existante.
+- Peut évoluer vers une solution plus robuste (Celery/Redis) si besoin.
+
+### Limites
+- Si le serveur redémarre, les tâches en mémoire sont perdues (prévoir une persistance sur disque si besoin).
+- Pour une forte charge ou plusieurs serveurs, préférer une file d’attente externe (ex: Redis).
+
+### Pour aller plus loin
+- Ajouter une persistance des tâches sur disque (fichier JSON par tâche).
+- Passer à Celery/Redis pour la scalabilité.
+- Ajouter des notifications (webhook, email) quand la transcription est prête.
+
+--- 
+
+## Formats de sortie disponibles
+
+L’API permet de choisir le format de sortie de la transcription :
+- `txt` : texte brut (par défaut)
+- `srt` : sous-titres SRT (avec timestamps, compatible vidéo)
+- `vtt` : WebVTT (pour affichage synchronisé sur le web)
+
+### Utilisation du paramètre `output_format`
+
+Ajoutez le champ `output_format` dans votre requête JSON ou formulaire :
+
+#### Exemple pour `/transcribe` ou `/transcribe-async`
+```json
+{
+  "audio_url": "https://.../fichier.mp3",
+  "model": "base",
+  "language": "fr",
+  "output_format": "vtt"
+}
+```
+
+#### Exemple pour `/transcribe/file` (upload)
+- Ajoutez un champ `output_format` dans le formulaire (valeur : `txt`, `srt` ou `vtt`).
+
+### Résultat
+- Le lien de transcription pointera vers le fichier généré au bon format :
+  - `.txt` pour le texte brut
+  - `.srt` pour les sous-titres SRT
+  - `.vtt` pour le format WebVTT
+
+### Affichage synchronisé (paroles, karaoké, etc.)
+- Utilisez le format `srt` ou `vtt` pour afficher les paroles synchronisées avec l’audio dans un lecteur compatible (HTML5, Video.js, Plyr, etc.).
+- Le format `txt` ne contient que le texte sans timestamps.
+
+--- 

@@ -3,7 +3,7 @@ FROM ubuntu:22.04
 # Variables d'environnement
 ENV DEBIAN_FRONTEND=noninteractive
 ENV WHISPER_PATH=/opt/whisper.cpp
-ENV MODEL_NAME=large-v3-turbo-q8_0
+ENV MODEL_NAME=large-v3
 ENV MODEL_PATH=${WHISPER_PATH}/models/ggml-${MODEL_NAME}.bin
 
 # Installation des dépendances système
@@ -28,7 +28,7 @@ RUN make && \
     ls -la build/bin/ && \
     echo "✅ Whisper.cpp compilé avec succès"
 
-# Télécharger le modèle large-v3-turbo-q8_0 avec retry
+# Télécharger le modèle MODEL_NAME avec retry
 RUN for i in 1 2 3; do \
         echo "Tentative $i de téléchargement du modèle ${MODEL_NAME}..."; \
         bash ./models/download-ggml-model.sh ${MODEL_NAME} && break; \
