@@ -4,36 +4,46 @@ services:
   whisper-api:
     build: .
     ports:
-      - "8080:8080"
+      - "8090:8080"
     environment:
       - FLASK_ENV=production
     volumes:
-      - ./models:/opt/whisper.cpp/models
+      - whisper-models:/opt/whisper.cpp/models
       - ./logs:/var/log/whisper
     restart: unless-stopped
     deploy:
       resources:
         limits:
-          memory: 2G
-          cpus: '1.0'
+          memory: 8G
+          cpus: '4.0'
         reservations:
-          memory: 1G
-          cpus: '0.5'
+          memory: 4G
+          cpus: '2.0'
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
+    networks:
+      - coolify
 
   nginx:
-    image: nginx:alpine
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile
     ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf
-      - ./ssl:/etc/nginx/ssl
+      - "90:80"
+      - "4443:443"
     depends_on:
       - whisper-api
     restart: unless-stopped 
+    networks:
+      - coolify
+
+networks:
+  coolify:
+    external: true
+
+volumes:
+  whisper-models:
