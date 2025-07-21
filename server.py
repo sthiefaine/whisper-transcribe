@@ -34,7 +34,7 @@ CORS(app, origins=["*"])  # En production, spécifiez vos domaines
 # Configuration
 WHISPER_PATH = "/opt/whisper.cpp"
 MODEL_PATH = f"{WHISPER_PATH}/models/ggml-base.bin"
-MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB max
+MAX_FILE_SIZE = 150 * 1024 * 1024  # 150MB max
 
 # Dictionnaire global pour stocker l'état des tâches asynchrones
 ASYNC_TASKS = {}
@@ -45,7 +45,7 @@ MAX_CONCURRENT_TRANSCRIPTIONS = 1
 
 # Fonction worker pour la transcription asynchrone
 
-def async_transcription_worker(task_id, audio_url, language, model, output_format='txt', prompt=None):
+def async_transcription_worker(task_id, audio_url, language, model, output_format='txt', word_thold=0.005, no_speech_thold=0.40, prompt=None):
     global ACTIVE_TRANSCRIPTIONS
     try:
         ASYNC_TASKS[task_id]['status'] = 'processing'
@@ -70,8 +70,10 @@ def async_transcription_worker(task_id, audio_url, language, model, output_forma
             temp_file_path,
             language,
             output_format,
-            prompt=prompt,
-            no_timestamps=(output_format == "txt")
+            no_timestamps=(output_format == "txt"),
+            word_thold=word_thold,
+            no_speech_thold=no_speech_thold,
+            prompt=prompt
         )
         import subprocess
         process = subprocess.Popen(
@@ -153,14 +155,17 @@ def cleanup_old_transcriptions(output_dir="/var/log/whisper", max_age_hours=24):
 
 # Fonction utilitaire pour construire la commande whisper-cli
 
+
 def build_whisper_cmd(
     whisper_path,
     model_path,
     temp_file_path,
     language,
     output_format,
-    prompt=None,
-    no_timestamps=False
+    no_timestamps=False,
+    word_thold=0.005,
+    no_speech_thold=0.40,
+    prompt=None
 ):
     cmd = [
         f"{whisper_path}/build/bin/whisper-cli",
@@ -168,11 +173,13 @@ def build_whisper_cmd(
         "-f", temp_file_path,
         "-l", language,
         f"-o{output_format}",
+        "--word-thold", str(word_thold),
+        "--no-speech-thold", str(no_speech_thold),
     ]
+    if prompt:
+        cmd.extend(["--prompt", prompt])
     if no_timestamps and output_format == "txt":
         cmd.append("--no-timestamps")
-    if prompt:
-        cmd += ["--prompt", prompt]
     return cmd
 
 @app.route('/health', methods=['GET'])
@@ -256,8 +263,10 @@ def transcribe():
             temp_file_path,
             language,
             output_format,
-            prompt=data.get('prompt') if 'data' in locals() and data else None,
-            no_timestamps=(output_format == "txt")
+            no_timestamps=(output_format == "txt"),
+            word_thold=data.get('word_thold', 0.005),
+            no_speech_thold=data.get('no_speech_thold', 0.40),
+            prompt=data.get('prompt')
         )
         
         logger.info(f"Exécution: {' '.join(cmd)}")
@@ -469,8 +478,10 @@ def transcribe_file():
             temp_file_path,
             language,
             output_format,
-            prompt=request.form.get('prompt'),
-            no_timestamps=(output_format == "txt")
+            no_timestamps=(output_format == "txt"),
+            word_thold=float(request.form.get('word_thold', 0.005)),
+            no_speech_thold=float(request.form.get('no_speech_thold', 0.40)),
+            prompt=request.form.get('prompt')
         )
         
         logger.info(f"Exécution: {' '.join(cmd)}")
@@ -696,6 +707,8 @@ def transcribe_async():
     language = data.get('language', 'fr')
     model = data.get('model', 'base')
     output_format = data.get('output_format', 'txt').lower()
+    word_thold = data.get('word_thold', 0.005)
+    no_speech_thold = data.get('no_speech_thold', 0.40)
     prompt = data.get('prompt')
     if not audio_url:
         return jsonify({"error": "audio_url requis"}), 400
@@ -703,7 +716,7 @@ def transcribe_async():
     task_id = str(uuid.uuid4())
     ASYNC_TASKS[task_id] = {'status': 'pending', 'result': None, 'progress': 0}
     ACTIVE_TRANSCRIPTIONS += 1
-    thread = threading.Thread(target=async_transcription_worker, args=(task_id, audio_url, language, model, output_format, prompt))
+    thread = threading.Thread(target=async_transcription_worker, args=(task_id, audio_url, language, model, output_format, word_thold, no_speech_thold, prompt))
     thread.start()
     return jsonify({"task_id": task_id, "status_url": f"/transcription-status/{task_id}"})
 
