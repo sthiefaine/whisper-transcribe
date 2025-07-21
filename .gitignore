@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+
+# Logs
+logs/
+*.log
+
+# Models (optionnel - peuvent être téléchargés)
+models/*.bin
+
+# Environment
+.env
+.env.local
+
+# Docker
+.dockerignore
+
+# IDE
+.vscode/
+.idea/
+
+# SSL certificates
+ssl/
+
+# Temporary files
+*.tmp
+*.temp 

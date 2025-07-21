@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  whisper-api:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - FLASK_ENV=production
+    volumes:
+      - ./models:/opt/whisper.cpp/models
+      - ./logs:/var/log/whisper
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+        reservations:
+          memory: 1G
+          cpus: '0.5'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf
+      - ./ssl:/etc/nginx/ssl
+    depends_on:
+      - whisper-api
+    restart: unless-stopped 

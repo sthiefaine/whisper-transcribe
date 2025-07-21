@@ -1,0 +1,73 @@
+{
+  "name": "laboitedechocolat-whisper",
+  "version": "1.0.0",
+  "description": "Service de transcription audio Whisper.cpp pour La Boîte de Chocolat",
+  "main": "server.py",
+  "scripts": {
+    "start": "./start.sh",
+    "dev": "./scripts/dev.sh",
+    "build": "docker-compose build",
+    "up": "docker-compose up -d",
+    "down": "docker-compose down",
+    "restart": "docker-compose restart",
+    "logs": "docker-compose logs -f whisper-api",
+    "logs-all": "docker-compose logs -f",
+    "test": "python3 test_api.py",
+    "test-local": "python3 test_local.py",
+    "test-quick": "./scripts/quick-test.sh",
+    "test-health": "curl -f http://localhost:8080/health",
+    "test-models": "curl http://localhost:8080/models",
+    "test-transcribe": "curl -X POST http://localhost:8080/transcribe/file -F \"audio_file=@data/avatar_test_short.mp3\" -F \"language=fr\" -F \"model=tiny\"",
+    "test-transcribe-base": "curl -X POST http://localhost:8080/transcribe/file -F \"audio_file=@data/avatar_test_short.mp3\" -F \"language=fr\" -F \"model=base\"",
+    "test-transcribe-small": "curl -X POST http://localhost:8080/transcribe/file -F \"audio_file=@data/avatar_test_short.mp3\" -F \"language=fr\" -F \"model=small\"",
+    "test-transcribe-medium": "curl -X POST http://localhost:8080/transcribe/file -F \"audio_file=@data/avatar_test_short.mp3\" -F \"language=fr\" -F \"model=medium\"",
+    "test-transcribe-large": "curl -X POST http://localhost:8080/transcribe/file -F \"audio_file=@data/avatar_test_short.mp3\" -F \"language=fr\" -F \"model=large\"",
+    "clean": "docker-compose down -v && docker system prune -f",
+    "install-deps": "pip install -r requirements.txt",
+    "install-whisper": "./scripts/install-whisper.sh",
+    "download-models": "./scripts/download-models.sh",
+    "download-model-manual": "./scripts/download-model-manual.sh",
+    "download-model-medium": "./scripts/download-model-medium.sh",
+    "status": "docker-compose ps",
+    "shell": "docker-compose exec whisper-api /bin/bash",
+    "nginx-reload": "docker-compose exec nginx nginx -s reload",
+    "backup-models": "docker cp whisper-api:/opt/whisper.cpp/models ./backup/",
+    "restore-models": "docker cp ./backup/models whisper-api:/opt/whisper.cpp/",
+    "monitor": "watch -n 5 'docker stats --no-stream'",
+    "benchmark": "time curl -X POST http://localhost:8080/transcribe/file -F \"audio_file=@data/avatar_test_short.mp3\" -F \"language=fr\" -F \"model=base\"",
+    "deploy-railway": "echo 'Déployez sur Railway: https://railway.app/new/project'",
+    "deploy-render": "echo 'Déployez sur Render: https://render.com/docs/deploy-flask'",
+    "help": "./scripts/help.sh",
+    "check": "./scripts/check-install.sh",
+    "setup": "npm run install-deps && npm run build && npm run up",
+    "reset": "npm run down && npm run clean && npm run setup",
+    "clean:docker": "docker-compose down -v && docker system prune -af",
+    "rebuild:docker": "docker-compose build --no-cache && docker-compose up"
+  },
+  "keywords": [
+    "whisper",
+    "transcription",
+    "audio",
+    "podcast",
+    "flask",
+    "docker",
+    "api"
+  ],
+  "author": "La Boîte de Chocolat",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sthiefaine/laboitedechocolat-whisper.git"
+  },
+  "engines": {
+    "node": ">=14.0.0",
+    "npm": ">=6.0.0"
+  },
+  "dependencies": {},
+  "devDependencies": {},
+  "config": {
+    "port": 8080,
+    "maxFileSize": "100MB",
+    "timeout": "600s"
+  }
+}
