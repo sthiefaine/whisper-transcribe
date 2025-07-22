@@ -20,6 +20,11 @@ from flask import send_from_directory
 import shutil
 import threading
 import re
+try:
+    from pydub.utils import mediainfo
+except ImportError:
+    mediainfo = None
+import urllib.parse
 
 # Configuration du logging
 logging.basicConfig(
@@ -43,27 +48,43 @@ ASYNC_TASKS = {}
 ACTIVE_TRANSCRIPTIONS = 0
 MAX_CONCURRENT_TRANSCRIPTIONS = 1
 
+# Ajout d'un logger global si pas déjà présent
+logger = logging.getLogger("__main__")
+if not logger.hasHandlers():
+    logging.basicConfig(level=logging.INFO)
+
 # Fonction worker pour la transcription asynchrone
 
 def async_transcription_worker(task_id, audio_url, language, model, output_format='txt', word_thold=0.005, no_speech_thold=0.40, prompt=None):
     global ACTIVE_TRANSCRIPTIONS
     try:
+        logger.info(f"[ASYNC] Tâche {task_id} : Démarrage de la transcription asynchrone")
+        logger.info(f"[ASYNC] Tâche {task_id} : Téléchargement de l'audio depuis {audio_url}")
         ASYNC_TASKS[task_id]['status'] = 'processing'
         ASYNC_TASKS[task_id]['progress'] = 0
-        # Télécharger l'audio (copie de la logique existante)
-        import tempfile, requests, os, uuid, urllib.parse, re
-        with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as temp_file:
-            response = requests.get(audio_url, stream=True, timeout=30)
-            response.raise_for_status()
+        # Télécharger le fichier audio
+        import tempfile, requests, os
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as temp_file:
+            r = requests.get(audio_url, stream=True)
             file_size = 0
-            for chunk in response.iter_content(chunk_size=8192):
-                temp_file.write(chunk)
-                file_size += len(chunk)
+            for chunk in r.iter_content(chunk_size=8192):
+                if chunk:
+                    temp_file.write(chunk)
+                    file_size += len(chunk)
             temp_file_path = temp_file.name
+        logger.info(f"[ASYNC] Tâche {task_id} : Audio téléchargé, début transcription")
+        # Obtenir la durée totale du fichier audio
+        duration = None
+        if mediainfo:
+            try:
+                info = mediainfo(temp_file_path)
+                duration = float(info['duration'])
+            except Exception as e:
+                logger.warning(f"[ASYNC] Tâche {task_id} : Impossible de lire la durée du fichier audio : {e}")
+        else:
+            logger.warning(f"[ASYNC] Tâche {task_id} : pydub non installé, progression désactivée.")
         # Construire la commande Whisper
         model_path = f"{WHISPER_PATH}/models/ggml-{model}.bin"
-        if not os.path.exists(model_path):
-            model_path = MODEL_PATH
         cmd = build_whisper_cmd(
             WHISPER_PATH,
             model_path,
@@ -75,63 +96,45 @@ def async_transcription_worker(task_id, audio_url, language, model, output_forma
             no_speech_thold=no_speech_thold,
             prompt=prompt
         )
-        import subprocess
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            cwd=WHISPER_PATH,
-            bufsize=1,
-            universal_newlines=True
-        )
-        # Lire la sortie en temps réel pour la progression
-        percent = 0
-        progress_re = re.compile(r'(\d{1,3})%')
-        while True:
-            line = process.stdout.readline() if process.stdout else None
-            if not line:
-                if process.poll() is not None:
-                    break
-                continue
-            # Chercher un pourcentage dans la ligne
-            match = progress_re.search(line)
-            if match:
-                percent = int(match.group(1))
-                ASYNC_TASKS[task_id]['progress'] = percent
+        import subprocess, re
+        logger.info(f"[ASYNC] Tâche {task_id} : Transcription en cours...")
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True, bufsize=1)
+        max_time = 0
+        for line in process.stdout or []:
+            # Cherche les timestamps [hh:mm:ss.xxx --> hh:mm:ss.xxx]
+            match = re.search(r'\[(\d+):(\d+):(\d+\.\d+) --> (\d+):(\d+):(\d+\.\d+)\]', line)
+            if match and duration:
+                h, m, s = int(match.group(4)), int(match.group(5)), float(match.group(6))
+                current_time = h*3600 + m*60 + s
+                if current_time > max_time:
+                    max_time = current_time
+                percent = int((max_time / duration) * 100)
+                ASYNC_TASKS[task_id]['progress'] = min(percent, 99)
         process.communicate()
         os.unlink(temp_file_path)
+        logger.info(f"[ASYNC] Tâche {task_id} : Transcription terminée avec succès")
+        ASYNC_TASKS[task_id]['progress'] = 100
         # Chercher le fichier de sortie
         parsed_url = urllib.parse.urlparse(audio_url)
         audio_base = os.path.splitext(os.path.basename(parsed_url.path))[0]
-        transcription_id = str(uuid.uuid4())
-        output_dir = "/var/log/whisper"
-        os.makedirs(output_dir, exist_ok=True)
-        output_path = os.path.join(output_dir, f"{audio_base}__{transcription_id}.{output_format}")
-        # Le whisper-cli sort le .txt dans le dossier courant
-        whisper_output = os.path.join(WHISPER_PATH, os.path.basename(temp_file_path).replace('.mp3', f'.{output_format}'))
-        transcription = None
-        if os.path.exists(whisper_output):
-            with open(whisper_output, 'r', encoding='utf-8') as f:
+        ext = f'.{output_format}'
+        output_filename = f"{audio_base}__{task_id}{ext}"
+        output_file = os.path.join("/var/log/whisper", output_filename)
+        if os.path.exists(output_file):
+            with open(output_file, 'r', encoding='utf-8') as f:
                 transcription = f.read().strip()
-            os.unlink(whisper_output)
-        elif process.stdout and process.stdout:
-            # Si le fichier n'existe pas mais qu'on a du texte sur STDOUT, l'utiliser
-            process.stdout.seek(0)
-            transcription = process.stdout.read().strip()
-        elif process.stderr and process.stderr:
-            process.stderr.seek(0)
-            transcription = process.stderr.read().strip()
-        if transcription:
-            with open(output_path, "w", encoding="utf-8") as f:
-                f.write(transcription)
-            ASYNC_TASKS[task_id]['status'] = 'done'
-            ASYNC_TASKS[task_id]['progress'] = 100
-            ASYNC_TASKS[task_id]['result'] = f"/transcriptions/{audio_base}__{transcription_id}.{output_format}"
+            ASYNC_TASKS[task_id]['status'] = 'completed'
+            ASYNC_TASKS[task_id]['result'] = {
+                "transcription": transcription,
+                "transcription_url": request.url_root.rstrip('/') + f"/transcriptions/{output_filename}",
+                "model_used": model,
+                "language": language
+            }
         else:
             ASYNC_TASKS[task_id]['status'] = 'error'
             ASYNC_TASKS[task_id]['result'] = "Fichier de sortie non trouvé et STDOUT vide"
     except Exception as e:
+        logger.error(f"[ASYNC] Tâche {task_id} : Erreur : {e}")
         ASYNC_TASKS[task_id]['status'] = 'error'
         ASYNC_TASKS[task_id]['result'] = str(e)
     finally:
@@ -731,6 +734,22 @@ def transcription_status(task_id):
 def get_transcription_file(transcription_file):
     output_dir = "/var/log/whisper"
     return send_from_directory(output_dir, transcription_file, as_attachment=True)
+
+@app.route('/transcriptions-list', methods=['GET'])
+def list_transcriptions():
+    output_dir = "/var/log/whisper"
+    base_url = request.url_root.rstrip('/') + "/transcriptions/"
+    if not os.path.exists(output_dir):
+        return jsonify([])
+    files = [f for f in os.listdir(output_dir) if os.path.isfile(os.path.join(output_dir, f))]
+    result = [
+        {
+            "filename": f,
+            "url": base_url + f
+        }
+        for f in files
+    ]
+    return jsonify(result)
 
 if __name__ == '__main__':
     # Vérifier que le modèle existe
