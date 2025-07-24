@@ -21,6 +21,7 @@ from flask import send_from_directory
 import shutil
 import threading
 import re
+import psutil  # Pour surveiller les ressources système
 
 try:
     from pydub.utils import mediainfo
@@ -53,6 +54,16 @@ MAX_CONCURRENT_TRANSCRIPTIONS = 1
 logger = logging.getLogger("__main__")
 if not logger.hasHandlers():
     logging.basicConfig(level=logging.INFO)
+
+
+def log_system_resources():
+    """Log les ressources système pour debug"""
+    try:
+        memory = psutil.virtual_memory()
+        cpu_percent = psutil.cpu_percent(interval=1)
+        logger.info(f"[SYSTEM] CPU: {cpu_percent}% | RAM: {memory.percent}% ({memory.used // 1024 // 1024}MB/{memory.total // 1024 // 1024}MB)")
+    except Exception as e:
+        logger.warning(f"[SYSTEM] Impossible de lire les ressources: {e}")
 
 
 def update_task_progress(task_id, progress, status=None):
@@ -292,17 +303,41 @@ def run_whisper_transcription(
         progress_count = 0
         last_progress_update = time.time()
         last_activity_time = time.time()  # Pour détecter les blocages
+        last_resource_check = time.time()  # Pour surveiller les ressources
 
         try:
             while True:
                 stdout_line = process.stdout.readline() if process.stdout else None
                 stderr_line = process.stderr.readline() if process.stderr else None
 
-                # Vérification de blocage (2 min sans activité)
+                # --- NOUVEAU : Surveillance des ressources système (toutes les 5 min) ---
                 current_time = time.time()
+                if current_time - last_resource_check > 300:  # 5 minutes
+                    log_system_resources()
+                    last_resource_check = current_time
+
+                # Vérification de blocage (2 min sans activité)
                 if current_time - last_activity_time > 120:
                     logger.warning(f"[WHISPER] Aucune activité depuis 2 minutes, processus peut être bloqué (PID: {process.pid})")
                     last_activity_time = current_time
+
+                # --- NOUVEAU : Timeout global Python (20h) ---
+                if current_time - start_time > 72000:
+                    logger.error(f"[WHISPER] Timeout global Python dépassé (20h) - PID: {process.pid}")
+                    process.kill()
+                    update_task_progress(task_id, 100, "error")
+                    ASYNC_TASKS[task_id]["result"] = "Timeout global Python dépassé (20h)"
+                    break
+
+                # --- NOUVEAU : Surveillance active du process ---
+                if process.poll() is not None:
+                    logger.info(f"[WHISPER] Processus terminé avec code: {process.returncode} (PID: {process.pid})")
+                    if process.returncode != 0:
+                        update_task_progress(task_id, 100, "error")
+                        ASYNC_TASKS[task_id]["result"] = f"Processus Whisper terminé anormalement (code {process.returncode})"
+                    else:
+                        update_task_progress(task_id, 90, "finalizing")
+                    break
 
                 if stdout_line:
                     last_activity_time = current_time  # Activité détectée
@@ -360,11 +395,6 @@ def run_whisper_transcription(
                             update_task_progress(task_id, 30)
                         elif "processing" in line_content.lower():
                             update_task_progress(task_id, 35)
-
-                # Vérifier si le processus est terminé
-                if process.poll() is not None:
-                    logger.info(f"[WHISPER] Processus terminé avec code: {process.returncode} (PID: {process.pid})")
-                    break
 
             # Phase finale
             update_task_progress(task_id, 90, "finalizing")
@@ -561,6 +591,39 @@ def transcribe_async():
             "status": "pending",
         }
     )
+
+
+@app.route("/reset-transcriptions", methods=["POST"])
+def reset_transcriptions():
+    """Réinitialiser le compteur de transcriptions actives (debug)"""
+    global ACTIVE_TRANSCRIPTIONS, ASYNC_TASKS
+    
+    # Nettoyer les tâches fantômes (plus de 2h)
+    current_time = time.time()
+    tasks_to_remove = []
+    
+    for task_id, task in ASYNC_TASKS.items():
+        if task.get("status") == "processing":
+            created_time = datetime.fromisoformat(task.get("created_at", "2020-01-01T00:00:00"))
+            if (current_time - created_time.timestamp()) > 86400:  # 24h
+                tasks_to_remove.append(task_id)
+    
+    for task_id in tasks_to_remove:
+        del ASYNC_TASKS[task_id]
+        logger.info(f"[RESET] Tâche fantôme supprimée: {task_id}")
+    
+    # Réinitialiser le compteur
+    old_count = ACTIVE_TRANSCRIPTIONS
+    ACTIVE_TRANSCRIPTIONS = 0
+    
+    logger.info(f"[RESET] Transcriptions actives: {old_count} → 0")
+    
+    return jsonify({
+        "success": True,
+        "message": f"Compteur réinitialisé: {old_count} → 0",
+        "tasks_removed": len(tasks_to_remove),
+        "active_transcriptions": ACTIVE_TRANSCRIPTIONS
+    })
 
 
 @app.route("/transcription-status/<task_id>", methods=["GET"])
