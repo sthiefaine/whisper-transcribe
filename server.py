@@ -58,12 +58,18 @@ if not logger.hasHandlers():
 def update_task_progress(task_id, progress, status=None):
     """Fonction utilitaire pour mettre à jour la progression d'une tâche"""
     if task_id and task_id in ASYNC_TASKS:
+        old_progress = ASYNC_TASKS[task_id].get("progress", 0)
+        old_status = ASYNC_TASKS[task_id].get("status", "")
+        
         ASYNC_TASKS[task_id]["progress"] = progress
         if status:
             ASYNC_TASKS[task_id]["status"] = status
-        logger.info(
-            f"[ASYNC] Tâche {task_id} : Progression {progress}% - Status: {ASYNC_TASKS[task_id]['status']}"
-        )
+        
+        # Ne logger que les changements significatifs (tous les 5% ou changement de status)
+        if (progress - old_progress >= 5) or (status and status != old_status):
+            logger.info(
+                f"[ASYNC] Tâche {task_id} : Progression {progress}% - Status: {ASYNC_TASKS[task_id]['status']}"
+            )
 
 
 # Fonction worker pour la transcription asynchrone
@@ -292,16 +298,19 @@ def run_whisper_transcription(
                 stdout_line = process.stdout.readline() if process.stdout else None
                 stderr_line = process.stderr.readline() if process.stderr else None
 
-                # Vérification de blocage (5 min sans activité)
+                # Vérification de blocage (2 min sans activité)
                 current_time = time.time()
-                if current_time - last_activity_time > 300:
-                    logger.warning(f"[WHISPER] Aucune activité depuis 5 minutes, processus peut être bloqué (PID: {process.pid})")
+                if current_time - last_activity_time > 120:
+                    logger.warning(f"[WHISPER] Aucune activité depuis 2 minutes, processus peut être bloqué (PID: {process.pid})")
                     last_activity_time = current_time
 
                 if stdout_line:
                     last_activity_time = current_time  # Activité détectée
                     stdout_lines.append(stdout_line.strip())
                     line_content = stdout_line.strip()
+                    
+                    # Log toutes les lignes de stdout pour debug
+                    logger.debug(f"[WHISPER] STDOUT: {line_content}")
 
                     # Analyse de la progression basée sur les logs de Whisper
                     if any(
@@ -335,6 +344,9 @@ def run_whisper_transcription(
                     last_activity_time = current_time  # Activité détectée aussi sur stderr
                     stderr_lines.append(stderr_line.strip())
                     line_content = stderr_line.strip()
+                    
+                    # Log toutes les lignes de stderr pour debug
+                    logger.debug(f"[WHISPER] STDERR: {line_content}")
 
                     # Logs d'erreur et de progression depuis stderr
                     if "error" in line_content.lower():
@@ -763,4 +775,6 @@ if __name__ == "__main__":
         exit(1)
 
     logger.info(f"Service Whisper démarré avec le modèle: {MODEL_PATH}")
-    app.run(host="0.0.0.0", port=8080, debug=True)
+    
+    # Configuration production
+    app.run(host="0.0.0.0", port=8080, debug=False, threaded=True)
