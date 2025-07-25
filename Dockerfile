@@ -51,8 +51,9 @@ COPY server.py .
 RUN useradd -m -u 1000 whisper && \
     chown -R whisper:whisper ${WHISPER_PATH}
 
-# Créer le dossier de logs avec les bons droits
-RUN mkdir -p /var/log/whisper && chmod 777 /var/log/whisper
+# Créer les dossiers de logs et work avec les bons droits
+RUN mkdir -p /var/log/whisper /var/log/whisper/work && \
+    chmod 777 /var/log/whisper /var/log/whisper/work
 
 USER whisper
 
@@ -61,5 +62,50 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8080/health || exit 1
 
-# Utiliser Flask en développement pour l'instant
-CMD ["python3", "server.py"]
+# Configuration pour éviter l'OOM killer
+RUN echo 'vm.overcommit_memory=1' >> /etc/sysctl.conf || true
+RUN echo 'vm.oom_kill_allocating_task=1' >> /etc/sysctl.conf || true
+
+# Script de lancement robuste
+COPY <<EOF /opt/start.sh
+#!/bin/bash
+set -e
+
+# Augmenter les limites de processus
+ulimit -c unlimited
+ulimit -n 65536
+
+# Configurer la mémoire virtuelle si possible
+echo 1 > /proc/sys/vm/overcommit_memory 2>/dev/null || true
+
+# Fonction de monitoring en arrière-plan
+monitor_memory() {
+    while true; do
+        memory_usage=\$(cat /proc/meminfo | grep MemAvailable | awk '{print \$2}')
+        if [ \$memory_usage -lt 1048576 ]; then  # Less than 1GB available
+            echo "WARNING: Low memory detected: \${memory_usage}KB available"
+        fi
+        sleep 60
+    done
+}
+
+# Lancer le monitoring en arrière-plan
+monitor_memory &
+MONITOR_PID=\$!
+
+# Fonction de nettoyage
+cleanup() {
+    echo "Cleaning up..."
+    kill \$MONITOR_PID 2>/dev/null || true
+    exit 0
+}
+
+trap cleanup SIGTERM SIGINT
+
+# Lancer l'application principale
+exec python3 server.py
+EOF
+
+RUN chmod +x /opt/start.sh
+
+CMD ["/opt/start.sh"]

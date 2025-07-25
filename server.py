@@ -1,843 +1,572 @@
 #!/usr/bin/env python3
 """
-Service de transcription audio Whisper.cpp pour La Boîte de Chocolat
-Version corrigée avec suivi de progression
+Whisper Transcription Service - Optimized for Large Files
+Handles 200MB+ files with resource constraints: 8GB RAM, 2.5 CPU max
 """
-
-print("=== VERSION DEBUG 2024-07-18 - WHISPER-CLI ===")
 
 import os
 import time
-import tempfile
-import subprocess
-import requests
-import logging
-from flask import Flask, request, jsonify
-from werkzeug.utils import secure_filename
-from flask_cors import CORS
-from datetime import datetime
 import uuid
-from flask import send_from_directory
-import shutil
-import threading
-import re
-import psutil  # Pour surveiller les ressources système
+import signal
+import subprocess
+from datetime import datetime
+from pathlib import Path
+from dataclasses import dataclass, asdict
+from typing import Dict, Optional
+from concurrent.futures import ThreadPoolExecutor
 
-try:
-    from pydub.utils import mediainfo
-except ImportError:
-    mediainfo = None
-import urllib.parse
-
-# Configuration du logging
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
-logger = logging.getLogger(__name__)
-
-app = Flask(__name__)
-CORS(app, origins=["*"])
+import requests
+import psutil
+from flask import Flask, request, jsonify, send_from_directory
+from flask_cors import CORS
 
 # Configuration
-WHISPER_PATH = "/opt/whisper.cpp"
-MODEL_PATH = f"{WHISPER_PATH}/models/ggml-base.bin"
-MAX_FILE_SIZE = 150 * 1024 * 1024  # 150MB max
+WHISPER_PATH = "/opt/whisper.cpp" if os.path.exists("/opt/whisper.cpp") else os.path.expanduser("~/whisper.cpp")
+OUTPUT_DIR = Path("/var/log/whisper")
+WORK_DIR = OUTPUT_DIR / "work"
+MAX_FILE_SIZE = 200 * 1024 * 1024  # 200MB
+MAX_CONCURRENT = 1  # Only one transcription at a time for large files
+CHUNK_SIZE = 8192
+TIMEOUT_HOURS = 4
 
-# Dictionnaire global pour stocker l'état des tâches asynchrones
-ASYNC_TASKS = {}
+# Create directories
+OUTPUT_DIR.mkdir(exist_ok=True)
+WORK_DIR.mkdir(exist_ok=True)
 
-# Compteur global pour les transcriptions actives
-ACTIVE_TRANSCRIPTIONS = 0
-MAX_CONCURRENT_TRANSCRIPTIONS = 1
+@dataclass
+class TranscriptionTask:
+    id: str
+    audio_url: str
+    model: str
+    language: str
+    output_format: str
+    word_thold: float
+    no_speech_thold: float
+    prompt: Optional[str]
+    created_at: datetime
+    status: str = "pending"
+    progress: int = 0
+    file_size: int = 0
+    result_file: Optional[str] = None
+    error: Optional[str] = None
+    
+    def to_dict(self):
+        return {
+            **asdict(self),
+            'created_at': self.created_at.isoformat(),
+            'elapsed_time': f"{(datetime.now() - self.created_at).total_seconds() / 3600:.1f}h"
+        }
 
-# Ajout d'un logger global si pas déjà présent
-logger = logging.getLogger("__main__")
-if not logger.hasHandlers():
-    logging.basicConfig(level=logging.INFO)
-
-
-def log_system_resources():
-    """Log les ressources système pour debug"""
-    try:
+class ResourceMonitor:
+    """Monitor CPU and memory usage"""
+    
+    @staticmethod
+    def get_usage():
         memory = psutil.virtual_memory()
         cpu_percent = psutil.cpu_percent(interval=1)
-        logger.info(f"[SYSTEM] CPU: {cpu_percent}% | RAM: {memory.percent}% ({memory.used // 1024 // 1024}MB/{memory.total // 1024 // 1024}MB)")
-    except Exception as e:
-        logger.warning(f"[SYSTEM] Impossible de lire les ressources: {e}")
+        return {
+            'cpu_percent': cpu_percent,
+            'memory_percent': memory.percent,
+            'memory_used_mb': memory.used // 1024 // 1024,
+            'memory_total_mb': memory.total // 1024 // 1024
+        }
+    
+    @staticmethod
+    def check_limits():
+        """Check if we're within resource limits - relaxed for Docker containers"""
+        usage = ResourceMonitor.get_usage()
+        # Only check CPU, let Docker handle memory limits
+        if usage['cpu_percent'] > 300:  # Allow some headroom
+            return False, f"CPU usage too high: {usage['cpu_percent']}%"
+        # Remove strict memory check - Docker handles this via cgroups
+        return True, None
 
-
-def update_task_progress(task_id, progress, status=None):
-    """Fonction utilitaire pour mettre à jour la progression d'une tâche"""
-    if task_id and task_id in ASYNC_TASKS:
-        old_progress = ASYNC_TASKS[task_id].get("progress", 0)
-        old_status = ASYNC_TASKS[task_id].get("status", "")
-        
-        ASYNC_TASKS[task_id]["progress"] = progress
-        if status:
-            ASYNC_TASKS[task_id]["status"] = status
-        
-        # Ne logger que les changements significatifs (tous les 5% ou changement de status)
-        if (progress - old_progress >= 5) or (status and status != old_status):
-            logger.info(
-                f"[ASYNC] Tâche {task_id} : Progression {progress}% - Status: {ASYNC_TASKS[task_id]['status']}"
-            )
-
-
-# Fonction worker pour la transcription asynchrone
-def async_transcription_worker(
-    task_id,
-    audio_url,
-    language,
-    model,
-    output_format="txt",
-    word_thold=0.005,
-    no_speech_thold=0.40,
-    prompt=None,
-):
-    global ACTIVE_TRANSCRIPTIONS
-    try:
-        logger.info(
-            f"[ASYNC] Tâche {task_id} : Démarrage de la transcription asynchrone"
-        )
-        update_task_progress(task_id, 5, "processing")
-
+class FileDownloader:
+    """Efficient file downloader with progress tracking"""
+    
+    @staticmethod
+    def download(url: str, filepath: Path, task: TranscriptionTask, progress_callback=None) -> bool:
         try:
-            logger.info(
-                f"[ASYNC] Tâche {task_id} : Appel à run_whisper_transcription..."
-            )
-            result = run_whisper_transcription(
-                audio_url,
-                language,
-                model,
-                output_format,
-                word_thold,
-                no_speech_thold,
-                prompt,
-                logger,
-                task_id=task_id,
-            )
-            logger.info(f"[ASYNC] Tâche {task_id} : run_whisper_transcription terminé")
-
-            if result.get("success"):
-                # Créer un fichier de transcription comme dans l'endpoint /transcribe/file
-                transcription = result.get("transcription", "")
-                if transcription:
-                    # Créer un nom de fichier basé sur l'URL et le task_id
-                    audio_filename = os.path.basename(urllib.parse.urlparse(audio_url).path) or "audio"
-                    audio_base = os.path.splitext(audio_filename)[0]
-                    transcription_id = task_id
-                    output_dir = "/var/log/whisper"
-                    os.makedirs(output_dir, exist_ok=True)
-                    output_path = os.path.join(
-                        output_dir, f"{audio_base}__{transcription_id}.{output_format}"
-                    )
+            response = requests.get(url, stream=True, timeout=300)
+            response.raise_for_status()
+            
+            total_size = int(response.headers.get('content-length', 0))
+            downloaded = 0
+            
+            with open(filepath, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=CHUNK_SIZE):
+                    if downloaded > MAX_FILE_SIZE:
+                        filepath.unlink(missing_ok=True)
+                        raise Exception(f"File too large (max {MAX_FILE_SIZE//1024//1024}MB)")
                     
-                    with open(output_path, "w", encoding="utf-8") as f:
-                        f.write(transcription)
+                    f.write(chunk)
+                    downloaded += len(chunk)
                     
-                    # Construire l'URL de téléchargement
-                    transcription_url = f"/transcriptions/{audio_base}__{transcription_id}.{output_format}"
-                    
-                    # Modifier le résultat pour inclure l'URL du fichier
-                    result["transcription_url"] = transcription_url
-                    result["transcription_file"] = f"{audio_base}__{transcription_id}.{output_format}"
-                    # Supprimer la transcription du résultat pour éviter de la retourner directement
-                    result.pop("transcription", None)
-                
-                update_task_progress(task_id, 100, "completed")
-                ASYNC_TASKS[task_id]["result"] = result
-            else:
-                update_task_progress(task_id, 100, "error")
-                ASYNC_TASKS[task_id]["result"] = result.get("error", "Erreur inconnue")
-
+                    if progress_callback and total_size > 0:
+                        progress = min(15, int((downloaded / total_size) * 15))  # 0-15%
+                        progress_callback(progress)
+            
+            task.file_size = downloaded
+            return True
+            
         except Exception as e:
-            logger.error(
-                f"[ASYNC] Tâche {task_id} : Exception dans run_whisper_transcription : {e}"
-            )
-            update_task_progress(task_id, 100, "error")
-            ASYNC_TASKS[task_id]["result"] = str(e)
+            task.error = f"Download failed: {str(e)}"
+            return False
 
-    except Exception as e:
-        logger.error(f"[ASYNC] Tâche {task_id} : Erreur générale : {e}")
-        update_task_progress(task_id, 100, "error")
-        ASYNC_TASKS[task_id]["result"] = str(e)
-    finally:
-        logger.info(f"[ASYNC] Tâche {task_id} : Thread terminé")
-        ACTIVE_TRANSCRIPTIONS -= 1
-
-
-# Fonction utilitaire pour nettoyer les fichiers de plus de 24h
-def cleanup_old_transcriptions(output_dir="/var/log/whisper", max_age_hours=24):
-    now = time.time()
-    if not os.path.exists(output_dir):
-        return
-    for filename in os.listdir(output_dir):
-        file_path = os.path.join(output_dir, filename)
-        if os.path.isfile(file_path):
-            file_age = now - os.path.getmtime(file_path)
-            if file_age > max_age_hours * 3600:
-                try:
-                    os.remove(file_path)
-                except Exception as e:
-                    logger.warning(f"Impossible de supprimer {file_path}: {e}")
-
-
-# Fonction utilitaire pour construire la commande whisper-cli
-def build_whisper_cmd(
-    whisper_path,
-    model_path,
-    temp_file_path,
-    language,
-    output_format,
-    no_timestamps=False,
-    word_thold=0.005,
-    no_speech_thold=0.40,
-    prompt=None,
-):
-    cmd = [
-        f"{whisper_path}/build/bin/whisper-cli",
-        "-m",
-        model_path,
-        "-f",
-        temp_file_path,
-        "-l",
-        language,
-        f"-o{output_format}",
-        "--word-thold",
-        str(word_thold),
-        "--no-speech-thold",
-        str(no_speech_thold),
-    ]
-    if prompt:
-        cmd.extend(["--prompt", prompt])
-    if no_timestamps and output_format == "txt":
-        cmd.append("--no-timestamps")
-    return cmd
-
-
-# === FONCTION PRINCIPALE DE TRANSCRIPTION AVEC SUIVI DE PROGRESSION ===
-def run_whisper_transcription(
-    audio_url,
-    language,
-    model,
-    output_format,
-    word_thold,
-    no_speech_thold,
-    prompt,
-    logger,
-    request=None,
-    task_id=None,
-):
-    import tempfile, requests, os, subprocess, time, uuid, urllib.parse
-
-    logger.info(f"[WHISPER] Début run_whisper_transcription pour {audio_url}")
-
-    WHISPER_PATH = "/opt/whisper.cpp"
-    MODEL_PATH = f"{WHISPER_PATH}/models/ggml-base.bin"
-    MAX_FILE_SIZE = 150 * 1024 * 1024
-    start_time = time.time()
-
-    # Phase 1: Téléchargement (10-20%)
-    update_task_progress(task_id, 10, "downloading")
-    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as temp_file:
-        response = requests.get(audio_url, stream=True, timeout=90)
-        response.raise_for_status()
-        file_size = 0
-        total_size = int(response.headers.get("content-length", 0))
-
-        for chunk in response.iter_content(chunk_size=8192):
-            if file_size > MAX_FILE_SIZE:
-                os.unlink(temp_file.name)
-                raise Exception("Fichier trop volumineux (max 150MB)")
-            temp_file.write(chunk)
-            file_size += len(chunk)
-
-            # Mise à jour progression téléchargement
-            if total_size > 0 and task_id:
-                download_progress = 10 + (file_size / total_size) * 10  # 10-20%
-                update_task_progress(task_id, int(download_progress))
-
-        temp_file_path = temp_file.name
-
-    update_task_progress(task_id, 20, "preparing")
-    logger.info(f"[WHISPER] Fichier téléchargé: {temp_file_path} ({file_size} bytes)")
-
-    # Phase 2: Préparation du modèle (20-25%)
-    model_path = f"{WHISPER_PATH}/models/ggml-{model}.bin"
-    if not os.path.exists(model_path):
-        model_path = MODEL_PATH
-
-    cmd = build_whisper_cmd(
-        WHISPER_PATH,
-        model_path,
-        temp_file_path,
-        language,
-        output_format,
-        no_timestamps=(output_format == "txt"),
-        word_thold=word_thold,
-        no_speech_thold=no_speech_thold,
-        prompt=prompt,
-    )
-
-    update_task_progress(task_id, 25, "transcribing")
-    logger.info(f"[WHISPER] Exécution: {' '.join(cmd)}")
-
-    try:
-        # Phase 3: Transcription avec suivi de progression (25-95%)
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            cwd=WHISPER_PATH,
-            bufsize=1,
-            universal_newlines=True,
-        )
-
-        # AJOUT MONITORING PID ET DÉBUT
-        logger.info(f"[WHISPER] Processus démarré avec PID: {process.pid}")
-        logger.info(f"[WHISPER] Début transcription à {datetime.now().isoformat()}")
+class WhisperTranscriber:
+    """Optimized Whisper transcription with progress tracking"""
+    
+    def __init__(self):
+        self.whisper_path = WHISPER_PATH
         
-        stdout_lines = []
-        stderr_lines = []
-        progress_count = 0
-        last_progress_update = time.time()
-        last_activity_time = time.time()  # Pour détecter les blocages
-        last_resource_check = time.time()  # Pour surveiller les ressources
-
+    def get_model_path(self, model: str) -> str:
+        model_file = f"ggml-{model}.bin"
+        model_path = Path(self.whisper_path) / "models" / model_file
+        if model_path.exists():
+            return str(model_path)
+        # Fallback to base model
+        return str(Path(self.whisper_path) / "models" / "ggml-base.bin")
+    
+    def build_command(self, audio_file: Path, model: str, language: str, 
+                     output_format: str, word_thold: float, no_speech_thold: float,
+                     prompt: Optional[str] = None) -> list:
+        model_path = self.get_model_path(model)
+        
+        cmd = [
+            str(Path(self.whisper_path) / "build" / "bin" / "whisper-cli"),
+            "-m", model_path,
+            "-f", str(audio_file),
+            "-l", language,
+            f"-o{output_format}",
+            "--word-thold", str(word_thold),
+            "--no-speech-thold", str(no_speech_thold),
+            "--threads", "2",  # Limit to 2 threads max
+            "--verbose",  # Force verbose output for monitoring
+            "--print-colors",  # Ensure output is printed
+            "--print-progress",  # Force progress output
+            "--print-special", "false",  # Reduce noise
+            "--print-realtime", "false"  # Avoid real-time issues
+        ]
+        
+        if prompt:
+            cmd.extend(["--prompt", prompt])
+        if output_format == "txt":
+            cmd.append("--no-timestamps")
+            
+        return cmd
+    
+    def transcribe(self, task: TranscriptionTask, audio_file: Path, 
+                  progress_callback=None) -> Optional[str]:
+        cmd = self.build_command(
+            audio_file, task.model, task.language, task.output_format,
+            task.word_thold, task.no_speech_thold, task.prompt
+        )
+        
         try:
-            while True:
-                stdout_line = process.stdout.readline() if process.stdout else None
-                stderr_line = process.stderr.readline() if process.stderr else None
-
-                # --- NOUVEAU : Surveillance des ressources système (toutes les 5 min) ---
+            # Enhanced process creation with better monitoring
+            import os
+            env = os.environ.copy()
+            env['OMP_NUM_THREADS'] = '2'  # Limit OpenMP threads
+            env['MKL_NUM_THREADS'] = '2'  # Limit MKL threads
+            env['CUDA_VISIBLE_DEVICES'] = ''  # Force CPU only for stability
+            
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                cwd=self.whisper_path,
+                env=env,
+                bufsize=1,  # Line buffered
+                universal_newlines=True,
+                preexec_fn=os.setsid if hasattr(os, 'setsid') else None  # Create process group
+            )
+            
+            # Monitor process with timeout
+            start_time = time.time()
+            timeout = TIMEOUT_HOURS * 3600
+            
+            last_activity = time.time()
+            last_output_time = time.time()
+            output_lines = []
+            error_lines = []
+            
+            # Real-time monitoring with output capture
+            while process.poll() is None:
                 current_time = time.time()
-                if current_time - last_resource_check > 300:  # 5 minutes
-                    log_system_resources()
-                    last_resource_check = current_time
-
-                # Vérification de blocage (2 min sans activité)
-                if current_time - last_activity_time > 120:
-                    logger.warning(f"[WHISPER] Aucune activité depuis 2 minutes, processus peut être bloqué (PID: {process.pid})")
-                    last_activity_time = current_time
-
-                # --- NOUVEAU : Timeout global Python (20h) ---
-                if current_time - start_time > 72000:
-                    logger.error(f"[WHISPER] Timeout global Python dépassé (20h) - PID: {process.pid}")
-                    process.kill()
-                    update_task_progress(task_id, 100, "error")
-                    ASYNC_TASKS[task_id]["result"] = "Timeout global Python dépassé (20h)"
-                    break
-
-                # --- NOUVEAU : Surveillance active du process ---
-                if process.poll() is not None:
-                    logger.info(f"[WHISPER] Processus terminé avec code: {process.returncode} (PID: {process.pid})")
-                    if process.returncode != 0:
-                        update_task_progress(task_id, 100, "error")
-                        ASYNC_TASKS[task_id]["result"] = f"Processus Whisper terminé anormalement (code {process.returncode})"
-                    else:
-                        update_task_progress(task_id, 90, "finalizing")
-                    break
-
-                if stdout_line:
-                    last_activity_time = current_time  # Activité détectée
-                    stdout_lines.append(stdout_line.strip())
-                    line_content = stdout_line.strip()
+                elapsed = current_time - start_time
+                
+                if elapsed > timeout:
+                    try:
+                        os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+                    except:
+                        process.terminate()
+                    time.sleep(5)
+                    if process.poll() is None:
+                        try:
+                            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                        except:
+                            process.kill()
+                    raise Exception(f"Transcription timeout ({TIMEOUT_HOURS}h)")
+                
+                # Read output non-blocking
+                import select
+                ready, _, _ = select.select([process.stdout, process.stderr], [], [], 1)
+                
+                got_output = False
+                for stream in ready:
+                    line = stream.readline()
+                    if line:
+                        got_output = True
+                        last_output_time = current_time
+                        if stream == process.stdout:
+                            output_lines.append(line.strip())
+                            # Parse progress from whisper output
+                            if any(word in line.lower() for word in ['progress', '%', 'segment']):
+                                # Extract percentage if present
+                                import re
+                                match = re.search(r'(\d+)%', line)
+                                if match:
+                                    whisper_progress = int(match.group(1))
+                                    progress = 20 + int(whisper_progress * 0.7)  # 20-90%
+                                    if progress_callback:
+                                        progress_callback(progress)
+                        else:
+                            error_lines.append(line.strip())
+                
+                # Check if process is alive and working
+                try:
+                    proc_info = psutil.Process(process.pid)
+                    if not proc_info.is_running():
+                        raise Exception("Whisper process died unexpectedly")
                     
-                    # Log toutes les lignes de stdout pour debug
-                    logger.debug(f"[WHISPER] STDOUT: {line_content}")
+                    # If no output for too long, it might be stuck
+                    if current_time - last_output_time > 1800:  # 30 minutes no output
+                        # Send SIGCONT to try to wake it up
+                        try:
+                            os.kill(process.pid, signal.SIGCONT)
+                            print(f"Sent SIGCONT to potentially stuck process {process.pid}")
+                            last_output_time = current_time  # Reset timer
+                        except:
+                            pass
+                        
+                        # If still no output after trying to wake up, consider it stuck
+                        if current_time - last_activity > 3600:  # 1 hour total silence
+                            raise Exception("Process stuck - no output for 1 hour")
+                            
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    raise Exception("Whisper process died unexpectedly")
+                
+                # Update progress based on time if no output progress
+                if not got_output and progress_callback:
+                    estimated_duration = task.file_size / (1024 * 1024) * 2  # 2min per MB
+                    progress = min(90, int(20 + (elapsed / estimated_duration) * 70))
+                    progress_callback(progress)
+                
+                time.sleep(2)  # Check every 2 seconds for better responsiveness
+            
+            # Collect any remaining output
+            remaining_stdout, remaining_stderr = process.communicate()
+            if remaining_stdout:
+                output_lines.extend(remaining_stdout.splitlines())
+            if remaining_stderr:
+                error_lines.extend(remaining_stderr.splitlines())
+            
+            stdout = '\n'.join(output_lines)
+            stderr = '\n'.join(error_lines)
+            
+            if process.returncode != 0:
+                error_msg = f"Whisper failed (code {process.returncode}): {stderr}"
+                if "out of memory" in stderr.lower():
+                    error_msg = "Out of memory - file too large for available RAM"
+                elif "cuda" in stderr.lower():
+                    error_msg = "CUDA error - using CPU fallback"
+                raise Exception(error_msg)
+            
+            # Find output file
+            base_name = audio_file.stem
+            output_file = Path(self.whisper_path) / f"{base_name}.{task.output_format}"
+            
+            if output_file.exists():
+                content = output_file.read_text(encoding='utf-8')
+                output_file.unlink()  # Clean up
+                return content
+            elif stdout.strip():
+                return stdout.strip()
+            else:
+                # Last resort: check for any .srt/.txt files created recently
+                for ext in [task.output_format, 'txt', 'srt']:
+                    pattern = f"*.{ext}"
+                    recent_files = sorted(
+                        Path(self.whisper_path).glob(pattern),
+                        key=lambda p: p.stat().st_mtime,
+                        reverse=True
+                    )
+                    if recent_files:
+                        newest = recent_files[0]
+                        if time.time() - newest.stat().st_mtime < 300:  # Created in last 5 min
+                            content = newest.read_text(encoding='utf-8')
+                            newest.unlink()
+                            return content
+                
+                raise Exception("No transcription output found")
+                
+        except Exception as e:
+            task.error = str(e)
+            return None
 
-                    # Analyse de la progression basée sur les logs de Whisper
-                    if any(
-                        keyword in line_content.lower()
-                        for keyword in ["progress", "segment", "frame"]
-                    ):
-                        progress_count += 1
-                        # Estimation de progression basée sur le nombre de segments traités
-                        estimated_progress = min(
-                            25 + (progress_count * 2), 90
-                        )  # 25-90%
+class TranscriptionService:
+    """Main service for handling transcription tasks"""
+    
+    def __init__(self):
+        self.tasks: Dict[str, TranscriptionTask] = {}
+        self.executor = ThreadPoolExecutor(max_workers=MAX_CONCURRENT)
+        self.transcriber = WhisperTranscriber()
+        self.is_processing = False
+        
+    def create_task(self, audio_url: str, model: str, language: str,
+                   output_format: str, word_thold: float, no_speech_thold: float,
+                   prompt: Optional[str] = None) -> str:
+        
+        if self.is_processing:
+            raise Exception("Another transcription is already in progress")
+            
+        task_id = str(uuid.uuid4())
+        task = TranscriptionTask(
+            id=task_id,
+            audio_url=audio_url,
+            model=model,
+            language=language,
+            output_format=output_format,
+            word_thold=word_thold,
+            no_speech_thold=no_speech_thold,
+            prompt=prompt,
+            created_at=datetime.now()
+        )
+        
+        self.tasks[task_id] = task
+        self.executor.submit(self._process_task, task)
+        
+        return task_id
+    
+    def _process_task(self, task: TranscriptionTask):
+        self.is_processing = True
+        
+        try:
+            # Update progress callback
+            def update_progress(progress: int, status: str = None):
+                task.progress = progress
+                if status:
+                    task.status = status
+            
+            update_progress(0, "downloading")
+            
+            # Download file
+            audio_file = WORK_DIR / f"audio_{task.id}.mp3"
+            downloader = FileDownloader()
+            
+            if not downloader.download(task.audio_url, audio_file, task, 
+                                     lambda p: update_progress(p, "downloading")):
+                return
+            
+            update_progress(20, "transcribing")
+            
+            # Transcribe
+            result = self.transcriber.transcribe(
+                task, audio_file, 
+                lambda p: update_progress(p, "transcribing")
+            )
+            
+            if result:
+                # Save result
+                result_filename = f"{Path(task.audio_url).stem}_{task.id}.{task.output_format}"
+                result_path = OUTPUT_DIR / result_filename
+                result_path.write_text(result, encoding='utf-8')
+                
+                task.result_file = result_filename
+                task.status = "completed"
+                task.progress = 100
+            else:
+                task.status = "error"
+                task.progress = 100
+                
+        except Exception as e:
+            task.error = str(e)
+            task.status = "error"
+            task.progress = 100
+            
+        finally:
+            # Clean up
+            audio_file.unlink(missing_ok=True)
+            self.is_processing = False
+    
+    def get_task(self, task_id: str) -> Optional[TranscriptionTask]:
+        return self.tasks.get(task_id)
+    
+    def list_tasks(self) -> list:
+        return [task.to_dict() for task in self.tasks.values()]
+    
+    def cleanup_old_tasks(self, max_age_hours: int = 24):
+        """Clean up old tasks and files"""
+        cutoff = datetime.now().timestamp() - (max_age_hours * 3600)
+        
+        to_remove = []
+        for task_id, task in self.tasks.items():
+            if task.created_at.timestamp() < cutoff:
+                # Remove result file if exists
+                if task.result_file:
+                    result_path = OUTPUT_DIR / task.result_file
+                    result_path.unlink(missing_ok=True)
+                to_remove.append(task_id)
+        
+        for task_id in to_remove:
+            del self.tasks[task_id]
 
-                        # Log tous les 100 segments
-                        if progress_count % 100 == 0:
-                            logger.info(f"[WHISPER] Progression: {progress_count} segments traités (PID: {process.pid})")
-
-                        # Ne pas spammer les mises à jour, max 1 par seconde
-                        if time.time() - last_progress_update > 1.0:
-                            update_task_progress(task_id, int(estimated_progress))
-                            last_progress_update = time.time()
-
-                    # Détecter les pourcentages dans les logs si disponibles
-                    percentage_match = re.search(r"(\d+)%", line_content)
-                    if percentage_match:
-                        whisper_progress = int(percentage_match.group(1))
-                        # Mapper le pourcentage de Whisper sur notre échelle 25-90%
-                        our_progress = 25 + (whisper_progress * 65 / 100)
-                        update_task_progress(task_id, int(our_progress))
-
-                if stderr_line:
-                    last_activity_time = current_time  # Activité détectée aussi sur stderr
-                    stderr_lines.append(stderr_line.strip())
-                    line_content = stderr_line.strip()
-                    
-                    # Log toutes les lignes de stderr pour debug
-                    logger.debug(f"[WHISPER] STDERR: {line_content}")
-
-                    # Logs d'erreur et de progression depuis stderr
-                    if "error" in line_content.lower():
-                        logger.error(f"[WHISPER] Erreur: {line_content}")
-                    elif any(
-                        keyword in line_content.lower()
-                        for keyword in ["loading", "processing"]
-                    ):
-                        # Mise à jour progressive pour les étapes de chargement
-                        if "loading" in line_content.lower():
-                            update_task_progress(task_id, 30)
-                        elif "processing" in line_content.lower():
-                            update_task_progress(task_id, 35)
-
-            # Phase finale
-            update_task_progress(task_id, 90, "finalizing")
-            remaining_stdout, remaining_stderr = process.communicate(timeout=86400)
-            stdout_lines.extend(remaining_stdout.splitlines())
-            stderr_lines.extend(remaining_stderr.splitlines())
-
-        except subprocess.TimeoutExpired:
-            logger.error(f"[WHISPER] Timeout du process Whisper (1h) - PID: {process.pid}")
-            process.kill()
-            raise Exception("Timeout du process Whisper (1h)")
-
-        stdout = "\n".join(stdout_lines)
-        stderr = "\n".join(stderr_lines)
-        result = subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
-
-    finally:
-        os.unlink(temp_file_path)
-
-    if result.returncode != 0:
-        logger.error(f"[WHISPER] Erreur Whisper: {result.stderr}")
-        raise Exception(f"Erreur transcription: {result.stderr}")
-
-    # Phase 4: Récupération du résultat (95-100%)
-    update_task_progress(task_id, 95, "processing_result")
-
-    transcription = None
-    base_filename = os.path.basename(temp_file_path)
-    ext = f".{output_format}"
-    output_filename = base_filename.replace(".mp3", ext)
-    output_file = os.path.join(WHISPER_PATH, output_filename)
-
-    logger.info(f"[WHISPER] Recherche du fichier de sortie: {output_file}")
-
-    if os.path.exists(output_file):
-        with open(output_file, "r", encoding="utf-8") as f:
-            transcription = f.read().strip()
-        os.unlink(output_file)
-    elif result.stdout and result.stdout.strip():
-        transcription = result.stdout.strip()
-    else:
-        logger.error(f"[WHISPER] Fichier de sortie non trouvé et STDOUT vide")
-        raise Exception("Fichier de sortie non trouvé et STDOUT vide")
-
-    processing_time = time.time() - start_time
-    logger.info(
-        f"[WHISPER] Fin run_whisper_transcription, durée: {processing_time:.2f}s"
-    )
-
-    return {
-        "success": True,
-        "transcription": transcription,
-        "model": f"whisper-{model}-{language}",
-        "processing_time": processing_time,
-        "file_size": file_size,
-    }
-
+# Initialize service
+app = Flask(__name__)
+CORS(app, origins=["*"])
+service = TranscriptionService()
 
 @app.route("/health", methods=["GET"])
 def health():
-    """Endpoint de santé pour les health checks"""
-    return jsonify(
-        {
-            "status": "healthy",
-            "timestamp": datetime.now().isoformat(),
-            "model": "whisper-base-fr",
-            "version": "1.0.0",
-        }
-    )
-
-
-@app.route("/models", methods=["GET"])
-def list_models():
-    """Lister les modèles disponibles"""
-    models_dir = f"{WHISPER_PATH}/models"
-    models = []
-
-    if os.path.exists(models_dir):
-        for file in os.listdir(models_dir):
-            if file.endswith(".bin"):
-                models.append(file)
-
-    return jsonify({"models": models, "current_model": os.path.basename(MODEL_PATH)})
-
-
-# === ENDPOINT SYNCHRONE ===
-@app.route("/transcribe", methods=["POST"])
-def transcribe():
-    global ACTIVE_TRANSCRIPTIONS
-    if ACTIVE_TRANSCRIPTIONS >= MAX_CONCURRENT_TRANSCRIPTIONS:
-        return (
-            jsonify(
-                {
-                    "error": "Transcription en cours, veuillez réessayer dans quelques minutes"
-                }
-            ),
-            429,
-        )
-    try:
-        ACTIVE_TRANSCRIPTIONS += 1
-        data = request.get_json()
-        if not data:
-            return jsonify({"error": "Données JSON requises"}), 400
-        audio_url = data.get("audio_url")
-        language = data.get("language", "fr")
-        model = data.get("model", "base")
-        output_format = data.get("output_format", "txt").lower()
-        word_thold = data.get("word_thold", 0.005)
-        no_speech_thold = data.get("no_speech_thold", 0.40)
-        prompt = data.get("prompt")
-        if not audio_url:
-            return jsonify({"error": "audio_url requis"}), 400
-        result = run_whisper_transcription(
-            audio_url,
-            language,
-            model,
-            output_format,
-            word_thold,
-            no_speech_thold,
-            prompt,
-            logger,
-            request,
-        )
-        return jsonify(result)
-    except Exception as e:
-        logger.error(f"Erreur inattendue: {e}")
-        return jsonify({"error": str(e)}), 500
-    finally:
-        ACTIVE_TRANSCRIPTIONS -= 1
-
+    usage = ResourceMonitor.get_usage()
+    return jsonify({
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "is_processing": service.is_processing,
+        "resource_usage": usage
+    })
 
 @app.route("/transcribe-async", methods=["POST"])
 def transcribe_async():
-    global ACTIVE_TRANSCRIPTIONS
-
-    # Vérifier si une transcription est déjà en cours
-    if ACTIVE_TRANSCRIPTIONS >= MAX_CONCURRENT_TRANSCRIPTIONS:
-        return (
-            jsonify(
-                {
-                    "error": "Transcription en cours, veuillez réessayer dans quelques minutes"
-                }
-            ),
-            429,
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "JSON data required"}), 400
+        
+        # Validate required fields
+        audio_url = data.get("audio_url")
+        if not audio_url:
+            return jsonify({"error": "audio_url required"}), 400
+        
+        # Quick availability check
+        if service.is_processing:
+            return jsonify({"error": "Another transcription is already in progress"}), 429
+        
+        task_id = service.create_task(
+            audio_url=audio_url,
+            model=data.get("model", "large-v3"),
+            language=data.get("language", "fr"),
+            output_format=data.get("output_format", "srt"),
+            word_thold=data.get("word_thold", 0.005),
+            no_speech_thold=data.get("no_speech_thold", 0.40),
+            prompt=data.get("prompt")
         )
-
-    data = request.get_json()
-    if not data:
-        return jsonify({"error": "Données JSON requises"}), 400
-
-    audio_url = data.get("audio_url")
-    language = data.get("language", "fr")
-    model = data.get("model", "base")
-    output_format = data.get("output_format", "txt").lower()
-    word_thold = data.get("word_thold", 0.005)
-    no_speech_thold = data.get("no_speech_thold", 0.40)
-    prompt = data.get("prompt")
-
-    if not audio_url:
-        return jsonify({"error": "audio_url requis"}), 400
-
-    # Créer une nouvelle tâche
-    task_id = str(uuid.uuid4())
-    ASYNC_TASKS[task_id] = {
-        "status": "pending",
-        "result": None,
-        "progress": 0,
-        "created_at": datetime.now().isoformat(),
-    }
-
-    ACTIVE_TRANSCRIPTIONS += 1
-
-    # Lancer le thread de transcription
-    thread = threading.Thread(
-        target=async_transcription_worker,
-        args=(
-            task_id,
-            audio_url,
-            language,
-            model,
-            output_format,
-            word_thold,
-            no_speech_thold,
-            prompt,
-        ),
-    )
-    thread.daemon = True  # Thread daemon pour éviter les blocages
-    thread.start()
-
-    return jsonify(
-        {
+        
+        return jsonify({
             "task_id": task_id,
-            "status_url": f"/transcription-status/{task_id}",
-            "status": "pending",
-        }
-    )
+            "status_url": f"/status/{task_id}",
+            "status": "pending"
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
+@app.route("/status/<task_id>", methods=["GET"])
+def get_status(task_id: str):
+    task = service.get_task(task_id)
+    if not task:
+        return jsonify({"error": "Task not found"}), 404
+    
+    response = task.to_dict()
+    
+    # Add download URL if completed
+    if task.status == "completed" and task.result_file:
+        response["download_url"] = f"/download/{task.result_file}"
+    
+    return jsonify(response)
 
-@app.route("/reset-transcriptions", methods=["POST"])
-def reset_transcriptions():
-    """Réinitialiser le compteur de transcriptions actives (debug)"""
-    global ACTIVE_TRANSCRIPTIONS, ASYNC_TASKS
+@app.route("/download/<filename>", methods=["GET"])
+def download_file(filename: str):
+    file_path = OUTPUT_DIR / filename
+    if not file_path.exists():
+        return jsonify({"error": "File not found"}), 404
     
-    # Nettoyer les tâches fantômes (plus de 2h)
-    current_time = time.time()
-    tasks_to_remove = []
+    return send_from_directory(OUTPUT_DIR, filename, as_attachment=True)
+
+@app.route("/list", methods=["GET"])
+def list_transcriptions():
+    """List all available transcription files with metadata"""
+    files = []
     
-    for task_id, task in ASYNC_TASKS.items():
-        if task.get("status") == "processing":
-            created_time = datetime.fromisoformat(task.get("created_at", "2020-01-01T00:00:00"))
-            if (current_time - created_time.timestamp()) > 86400:  # 24h
-                tasks_to_remove.append(task_id)
+    for file_path in OUTPUT_DIR.glob("*.*"):
+        if file_path.is_file() and file_path.suffix in ['.srt', '.txt', '.vtt']:
+            stat = file_path.stat()
+            files.append({
+                "filename": file_path.name,
+                "size": stat.st_size,
+                "created_at": datetime.fromtimestamp(stat.st_ctime).isoformat(),
+                "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                "download_url": f"/download/{file_path.name}"
+            })
     
-    for task_id in tasks_to_remove:
-        del ASYNC_TASKS[task_id]
-        logger.info(f"[RESET] Tâche fantôme supprimée: {task_id}")
+    # Sort by creation time, newest first
+    files.sort(key=lambda x: x["created_at"], reverse=True)
     
-    # Réinitialiser le compteur
-    old_count = ACTIVE_TRANSCRIPTIONS
-    ACTIVE_TRANSCRIPTIONS = 0
-    
-    logger.info(f"[RESET] Transcriptions actives: {old_count} → 0")
+    return jsonify({
+        "files": files,
+        "total": len(files),
+        "current_tasks": service.list_tasks()
+    })
+
+@app.route("/tasks", methods=["GET"])
+def list_tasks():
+    return jsonify({
+        "tasks": service.list_tasks(),
+        "is_processing": service.is_processing
+    })
+
+@app.route("/reset", methods=["POST"])
+def reset_service():
+    """Force reset the service if stuck"""
+    service.is_processing = False
+    # Kill any running processes
+    for proc in psutil.process_iter(['pid', 'name']):
+        try:
+            if 'whisper' in proc.info['name'].lower():
+                proc.terminate()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
     
     return jsonify({
         "success": True,
-        "message": f"Compteur réinitialisé: {old_count} → 0",
-        "tasks_removed": len(tasks_to_remove),
-        "active_transcriptions": ACTIVE_TRANSCRIPTIONS
+        "message": "Service reset, processing flag cleared"
     })
 
-
-@app.route("/transcription-status/<task_id>", methods=["GET"])
-def transcription_status(task_id):
-    task = ASYNC_TASKS.get(task_id)
-    if not task:
-        return jsonify({"error": "Tâche inconnue"}), 404
-
-    response = {
-        "task_id": task_id,
-        "status": task["status"],
-        "progress": task.get("progress", 0),
-        "created_at": task.get("created_at"),
-    }
-
-    # Inclure le résultat seulement si la tâche est terminée
-    if task["status"] in ["completed", "error"]:
-        response["result"] = task["result"]
-
-    return jsonify(response)
-
-
-# === AUTRES ENDPOINTS ===
-@app.route("/transcribe/file", methods=["POST"])
-def transcribe_file():
-    global ACTIVE_TRANSCRIPTIONS
-    start_time = time.time()
-
-    if ACTIVE_TRANSCRIPTIONS >= MAX_CONCURRENT_TRANSCRIPTIONS:
-        return (
-            jsonify(
-                {
-                    "error": "Transcription en cours, veuillez réessayer dans quelques minutes"
-                }
-            ),
-            429,
-        )
-
-    try:
-        ACTIVE_TRANSCRIPTIONS += 1
-        if "audio_file" not in request.files:
-            return jsonify({"error": "Aucun fichier audio fourni"}), 400
-
-        audio_file = request.files["audio_file"]
-        if audio_file.filename == "":
-            return jsonify({"error": "Aucun fichier sélectionné"}), 400
-
-        language = request.form.get("language", "fr")
-        model = request.form.get("model", "base")
-        output_format = request.form.get("output_format", "txt").lower()
-
-        logger.info(f"Début transcription fichier: {audio_file.filename}")
-
-        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as temp_file:
-            audio_file.save(temp_file.name)
-            temp_file_path = temp_file.name
-            file_size = os.path.getsize(temp_file_path)
-
-        logger.info(f"Fichier sauvegardé: {temp_file_path} ({file_size} bytes)")
-
-        model_path = f"{WHISPER_PATH}/models/ggml-{model}.bin"
-        if not os.path.exists(model_path):
-            model_path = MODEL_PATH
-
-        cmd = build_whisper_cmd(
-            WHISPER_PATH,
-            model_path,
-            temp_file_path,
-            language,
-            output_format,
-            no_timestamps=(output_format == "txt"),
-            word_thold=float(request.form.get("word_thold", 0.005)),
-            no_speech_thold=float(request.form.get("no_speech_thold", 0.40)),
-            prompt=request.form.get("prompt"),
-        )
-
-        logger.info(f"Exécution: {' '.join(cmd)}")
-
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            cwd=WHISPER_PATH,
-            bufsize=1,
-            universal_newlines=True,
-        )
-
-        try:
-            stdout_lines = []
-            stderr_lines = []
-
-            while True:
-                stdout_line = process.stdout.readline() if process.stdout else None
-                stderr_line = process.stderr.readline() if process.stderr else None
-
-                if stdout_line:
-                    stdout_lines.append(stdout_line.strip())
-                if stderr_line:
-                    stderr_lines.append(stderr_line.strip())
-                if process.poll() is not None:
-                    break
-
-            remaining_stdout, remaining_stderr = process.communicate()
-            stdout_lines.extend(remaining_stdout.splitlines())
-            stderr_lines.extend(remaining_stderr.splitlines())
-
-            stdout = "\n".join(stdout_lines)
-            stderr = "\n".join(stderr_lines)
-            result = subprocess.CompletedProcess(
-                cmd, process.returncode, stdout, stderr
-            )
-
-        except subprocess.TimeoutExpired:
-            process.kill()
-            raise
-
-        os.unlink(temp_file_path)
-
-        if result.returncode != 0:
-            logger.error(f"Erreur Whisper: {result.stderr}")
-            return jsonify({"error": f"Erreur transcription: {result.stderr}"}), 500
-
-        transcription = None
-        if result.stdout and result.stdout.strip() and output_format == "txt":
-            transcription = result.stdout.strip()
-        else:
-            base_filename = os.path.basename(temp_file_path)
-            ext = f".{output_format}"
-            output_filename = base_filename.replace(".mp3", ext)
-            output_file = os.path.join(WHISPER_PATH, output_filename)
-
-            if os.path.exists(output_file):
-                with open(output_file, "r", encoding="utf-8") as f:
-                    transcription = f.read().strip()
-                os.unlink(output_file)
-            else:
-                return (
-                    jsonify({"error": "Fichier de sortie non trouvé et STDOUT vide"}),
-                    500,
-                )
-
-        processing_time = time.time() - start_time
-        cleanup_old_transcriptions()
-
-        if len(transcription) > 2000:
-            audio_filename = audio_file.filename or "audio"
-            audio_base = os.path.splitext(secure_filename(audio_filename))[0]
-            transcription_id = str(uuid.uuid4())
-            output_dir = "/var/log/whisper"
-            os.makedirs(output_dir, exist_ok=True)
-            output_path = os.path.join(
-                output_dir, f"{audio_base}__{transcription_id}.{output_format}"
-            )
-            with open(output_path, "w", encoding="utf-8") as f:
-                f.write(transcription)
-            transcription_url = (
-                request.url_root.rstrip("/")
-                + f"/transcriptions/{audio_base}__{transcription_id}.{output_format}"
-            )
-            return jsonify(
-                {
-                    "success": True,
-                    "transcription_url": transcription_url,
-                    "model": f"whisper-{model}-{language}",
-                    "processing_time": processing_time,
-                    "file_size": file_size,
-                    "filename": audio_file.filename,
-                }
-            )
-        else:
-            return jsonify(
-                {
-                    "success": True,
-                    "transcription": transcription,
-                    "model": f"whisper-{model}-{language}",
-                    "processing_time": processing_time,
-                    "file_size": file_size,
-                    "filename": audio_file.filename,
-                }
-            )
-
-    except Exception as e:
-        logger.error(f"Erreur inattendue: {e}")
-        return jsonify({"error": str(e)}), 500
-    finally:
-        ACTIVE_TRANSCRIPTIONS -= 1
-
-
-@app.route("/transcriptions/<path:transcription_file>", methods=["GET"])
-def get_transcription_file(transcription_file):
-    output_dir = "/var/log/whisper"
-    return send_from_directory(output_dir, transcription_file, as_attachment=True)
-
-
-@app.route("/transcriptions-list", methods=["GET"])
-def list_transcriptions():
-    output_dir = "/var/log/whisper"
-    base_url = request.url_root.rstrip("/") + "/transcriptions/"
-    if not os.path.exists(output_dir):
-        return jsonify([])
-    files = [
-        f for f in os.listdir(output_dir) if os.path.isfile(os.path.join(output_dir, f))
-    ]
-    result = [{"filename": f, "url": base_url + f} for f in files]
-    return jsonify(result)
-
+def cleanup_handler(signum, _):
+    """Graceful shutdown"""
+    print(f"Received signal {signum}, shutting down gracefully...")
+    service.cleanup_old_tasks()
+    exit(0)
 
 if __name__ == "__main__":
-    if not os.path.exists(MODEL_PATH):
-        logger.error(f"Modèle non trouvé: {MODEL_PATH}")
-        exit(1)
-
-    logger.info(f"Service Whisper démarré avec le modèle: {MODEL_PATH}")
+    # Register signal handlers
+    signal.signal(signal.SIGTERM, cleanup_handler)
+    signal.signal(signal.SIGINT, cleanup_handler)
     
-    # Configuration production
-    app.run(host="0.0.0.0", port=8080, debug=False, threaded=True)
+    # Cleanup old files on startup
+    service.cleanup_old_tasks()
+    
+    print("🚀 Whisper Transcription Service")
+    print(f"📁 Whisper path: {WHISPER_PATH}")
+    print(f"📂 Output directory: {OUTPUT_DIR}")
+    print(f"⏱️ Timeout: {TIMEOUT_HOURS}h")
+    print(f"💾 Max file size: {MAX_FILE_SIZE//1024//1024}MB")
+    print(f"🔄 Max concurrent: {MAX_CONCURRENT}")
+    
+    app.run(
+        host="0.0.0.0",
+        port=8080,
+        debug=False,
+        threaded=True
+    )
