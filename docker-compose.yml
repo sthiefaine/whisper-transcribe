@@ -8,6 +8,8 @@ services:
     environment:
       - FLASK_ENV=production
       - PYTHONUNBUFFERED=1
+      - PYTHONHASHSEED=random
+      - PYTHONDONTWRITEBYTECODE=1
     volumes:
       - whisper-models:/opt/whisper.cpp/models
       - ./logs:/var/log/whisper
@@ -15,19 +17,27 @@ services:
     deploy:
       resources:
         limits:
-          memory: 12G
-          cpus: '3.0'
+          memory: 16G  # Augmenté de 12G à 16G
+          cpus: '4.0'  # Augmenté de 3.0 à 4.0
         reservations:
-          memory: 4G
+          memory: 8G   # Augmenté de 4G à 8G
           cpus: '2.0'
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
+      interval: 60s    # Augmenté de 30s à 60s
+      timeout: 30s     # Augmenté de 10s à 30s
+      retries: 5       # Augmenté de 3 à 5
+      start_period: 120s  # Augmenté de 40s à 120s
     networks:
       - coolify
+    # Configuration pour éviter les timeouts Coolify
+    stop_grace_period: 300s  # 5 minutes pour arrêt gracieux
+    stop_signal: SIGTERM
 
   nginx:
     build:
@@ -39,6 +49,11 @@ services:
     depends_on:
       - whisper-api
     restart: unless-stopped 
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
     networks:
       - coolify
 

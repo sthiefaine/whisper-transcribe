@@ -1,13 +1,22 @@
 FROM nginx:alpine
 
-RUN addgroup -S whisper && adduser -S whisper -G whisper
+# Supprimer la configuration par défaut qui cause des conflits
+RUN rm -f /etc/nginx/conf.d/default.conf
 
-RUN mkdir -p /var/log/whisper && chown -R whisper:whisper /var/log/whisper && chmod -R 777 /var/log/whisper
+# Créer les dossiers nécessaires avec les bonnes permissions
+RUN mkdir -p /var/log/whisper && \
+    mkdir -p /var/cache/nginx && \
+    mkdir -p /run && \
+    chmod -R 777 /var/log/whisper && \
+    chmod -R 777 /var/cache/nginx && \
+    chmod 777 /run
 
-RUN mkdir -p /var/cache/nginx && chmod -R 777 /var/cache/nginx
-RUN mkdir -p /run && chmod 777 /run
-
+# Copier la configuration nginx
 COPY nginx.conf /etc/nginx/nginx.conf
 
-USER whisper
+# Exposer le port
+EXPOSE 80
+
+# Démarrer nginx
+CMD ["nginx", "-g", "daemon off;"]
 

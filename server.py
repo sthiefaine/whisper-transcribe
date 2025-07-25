@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
 Service de transcription audio Whisper.cpp pour La Boîte de Chocolat
-Version corrigée avec suivi de progression
+Version corrigée pour transcriptions longue durée (20h+)
 """
 
-print("=== VERSION DEBUG 2024-07-18 - WHISPER-CLI ===")
+print("=== VERSION DEBUG 2024-07-25 - WHISPER-CLI LONGUE DUREE ===")
 
 import os
 import time
@@ -35,11 +35,24 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Désactiver les logs verbeux de Werkzeug/Flask
+logging.getLogger('werkzeug').setLevel(logging.ERROR)
+logging.getLogger('flask').setLevel(logging.ERROR)
+
 app = Flask(__name__)
 CORS(app, origins=["*"])
 
 # Configuration
-WHISPER_PATH = "/opt/whisper.cpp"
+# Détection automatique du mode (Docker vs Local)
+if os.path.exists("/opt/whisper.cpp"):
+    # Mode Docker
+    WHISPER_PATH = "/opt/whisper.cpp"
+    print("🐳 Mode Docker détecté")
+else:
+    # Mode Local macOS
+    WHISPER_PATH = os.path.expanduser("~/whisper.cpp")
+    print("💻 Mode Local macOS détecté")
+
 MODEL_PATH = f"{WHISPER_PATH}/models/ggml-base.bin"
 MAX_FILE_SIZE = 150 * 1024 * 1024  # 150MB max
 
@@ -49,6 +62,39 @@ ASYNC_TASKS = {}
 # Compteur global pour les transcriptions actives
 ACTIVE_TRANSCRIPTIONS = 0
 MAX_CONCURRENT_TRANSCRIPTIONS = 1
+
+# Configuration pour éviter les kills par Coolify
+import signal
+import atexit
+
+def signal_handler(signum, frame):
+    """Gestionnaire de signal pour arrêt gracieux"""
+    logger.warning(f"[SYSTEM] Signal {signum} reçu, arrêt gracieux en cours...")
+    # Sauvegarder l'état des tâches en cours
+    for task_id, task in ASYNC_TASKS.items():
+        if task.get("status") == "processing":
+            logger.info(f"[SYSTEM] Sauvegarde de la tâche {task_id} avant arrêt")
+    sys.exit(0)
+
+# Enregistrer les gestionnaires de signal
+signal.signal(signal.SIGTERM, signal_handler)
+signal.signal(signal.SIGINT, signal_handler)
+
+def cleanup_on_exit():
+    """Nettoyage à la sortie"""
+    logger.info("[SYSTEM] Nettoyage à la sortie...")
+    for task_id, task in ASYNC_TASKS.items():
+        if task.get("status") == "processing":
+            logger.warning(f"[SYSTEM] Tâche {task_id} encore en cours à la sortie")
+
+atexit.register(cleanup_on_exit)
+
+# NOUVEAUX TIMEOUTS POUR LONGUE DUREE - VERSION ULTRA ROBUSTE
+MAX_TRANSCRIPTION_TIME = 86400  # 24h au lieu de 20h pour plus de marge
+ACTIVITY_TIMEOUT = 7200  # 2h au lieu de 1h pour éviter faux positifs
+RESOURCE_CHECK_INTERVAL = 180  # 3 min pour surveillance plus fréquente
+PROCESS_HEARTBEAT_INTERVAL = 180  # 3 min pour heartbeat du processus
+COOLIFY_KEEPALIVE_INTERVAL = 60  # 1 min pour keepalive Coolify
 
 # Ajout d'un logger global si pas déjà présent
 logger = logging.getLogger("__main__")
@@ -76,8 +122,8 @@ def update_task_progress(task_id, progress, status=None):
         if status:
             ASYNC_TASKS[task_id]["status"] = status
         
-        # Ne logger que les changements significatifs (tous les 5% ou changement de status)
-        if (progress - old_progress >= 5) or (status and status != old_status):
+        # Ne logger que les changements significatifs (tous les 10% ou changement de status)
+        if (progress - old_progress >= 10) or (status and status != old_status):
             logger.info(
                 f"[ASYNC] Tâche {task_id} : Progression {progress}% - Status: {ASYNC_TASKS[task_id]['status']}"
             )
@@ -215,7 +261,7 @@ def build_whisper_cmd(
     return cmd
 
 
-# === FONCTION PRINCIPALE DE TRANSCRIPTION AVEC SUIVI DE PROGRESSION ===
+# === FONCTION PRINCIPALE DE TRANSCRIPTION AVEC SUIVI DE PROGRESSION LONGUE DUREE ===
 def run_whisper_transcription(
     audio_url,
     language,
@@ -232,7 +278,12 @@ def run_whisper_transcription(
 
     logger.info(f"[WHISPER] Début run_whisper_transcription pour {audio_url}")
 
-    WHISPER_PATH = "/opt/whisper.cpp"
+    # Détection automatique du mode (Docker vs Local)
+    if os.path.exists("/opt/whisper.cpp"):
+        WHISPER_PATH = "/opt/whisper.cpp"  # Mode Docker
+    else:
+        WHISPER_PATH = os.path.expanduser("~/whisper.cpp")  # Mode Local macOS
+    
     MODEL_PATH = f"{WHISPER_PATH}/models/ggml-base.bin"
     MAX_FILE_SIZE = 150 * 1024 * 1024
     start_time = time.time()
@@ -240,7 +291,7 @@ def run_whisper_transcription(
     # Phase 1: Téléchargement (10-20%)
     update_task_progress(task_id, 10, "downloading")
     with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as temp_file:
-        response = requests.get(audio_url, stream=True, timeout=90)
+        response = requests.get(audio_url, stream=True, timeout=300)  # Augmenté à 5min
         response.raise_for_status()
         file_size = 0
         total_size = int(response.headers.get("content-length", 0))
@@ -283,7 +334,7 @@ def run_whisper_transcription(
     logger.info(f"[WHISPER] Exécution: {' '.join(cmd)}")
 
     try:
-        # Phase 3: Transcription avec suivi de progression (25-95%)
+        # Phase 3: Transcription avec suivi de progression LONGUE DUREE (25-95%)
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -294,47 +345,80 @@ def run_whisper_transcription(
             universal_newlines=True,
         )
 
-        # AJOUT MONITORING PID ET DÉBUT
+        # MONITORING PID ET DÉBUT
         logger.info(f"[WHISPER] Processus démarré avec PID: {process.pid}")
         logger.info(f"[WHISPER] Début transcription à {datetime.now().isoformat()}")
+        logger.info(f"[WHISPER] Timeout configuré pour: {MAX_TRANSCRIPTION_TIME/3600:.1f}h")
         
         stdout_lines = []
         stderr_lines = []
         progress_count = 0
         last_progress_update = time.time()
-        last_activity_time = time.time()  # Pour détecter les blocages
-        last_resource_check = time.time()  # Pour surveiller les ressources
+        last_activity_time = time.time()
+        last_resource_check = time.time()
+        last_major_log = time.time()  # Pour logger moins souvent
 
         try:
             while True:
                 stdout_line = process.stdout.readline() if process.stdout else None
                 stderr_line = process.stderr.readline() if process.stderr else None
 
-                # --- NOUVEAU : Surveillance des ressources système (toutes les 5 min) ---
                 current_time = time.time()
-                if current_time - last_resource_check > 300:  # 5 minutes
+                
+                # --- Surveillance des ressources système (toutes les 10 min) ---
+                if current_time - last_resource_check > RESOURCE_CHECK_INTERVAL:
                     log_system_resources()
                     last_resource_check = current_time
 
-                # Vérification de blocage (2 min sans activité)
-                if current_time - last_activity_time > 120:
-                    logger.warning(f"[WHISPER] Aucune activité depuis 2 minutes, processus peut être bloqué (PID: {process.pid})")
-                    last_activity_time = current_time
+                # --- Log de progression major toutes les heures ---
+                if current_time - last_major_log > 3600:  # 1h
+                    elapsed_hours = (current_time - start_time) / 3600
+                    logger.info(f"[WHISPER] Transcription en cours depuis {elapsed_hours:.1f}h - PID: {process.pid} - Segments: {progress_count}")
+                    last_major_log = current_time
 
-                # --- NOUVEAU : Timeout global Python (20h) ---
-                if current_time - start_time > 72000:
-                    logger.error(f"[WHISPER] Timeout global Python dépassé (20h) - PID: {process.pid}")
-                    process.kill()
+                # --- Vérification de blocage (2h au lieu de 1h) ---
+                if current_time - last_activity_time > ACTIVITY_TIMEOUT:
+                    elapsed_hours = (current_time - start_time) / 3600
+                    logger.warning(f"[WHISPER] Aucune activité depuis {ACTIVITY_TIMEOUT/60:.0f} minutes (durée totale: {elapsed_hours:.1f}h) - PID: {process.pid}")
+                    # On ne fait que logger, on ne tue pas le processus
+                    last_activity_time = current_time
+                    
+                # --- Heartbeat du processus toutes les 3 minutes ---
+                if current_time - last_progress_update > PROCESS_HEARTBEAT_INTERVAL:
+                    elapsed_hours = (current_time - start_time) / 3600
+                    logger.info(f"[WHISPER] Heartbeat - Transcription active depuis {elapsed_hours:.1f}h - PID: {process.pid} - Segments: {progress_count}")
+                    last_progress_update = current_time
+                    
+                # --- Keepalive Coolify toutes les minutes ---
+                if current_time - last_progress_update > COOLIFY_KEEPALIVE_INTERVAL:
+                    # Forcer un log pour maintenir l'activité
+                    logger.debug(f"[COOLIFY] Keepalive - PID: {process.pid} - Segments: {progress_count}")
+                    last_progress_update = current_time
+
+                # --- Timeout global augmenté à 24h ---
+                if current_time - start_time > MAX_TRANSCRIPTION_TIME:
+                    elapsed_hours = (current_time - start_time) / 3600
+                    logger.error(f"[WHISPER] Timeout global dépassé ({elapsed_hours:.1f}h) - PID: {process.pid}")
+                    try:
+                        process.terminate()  # Terminate avant kill
+                        time.sleep(5)
+                        if process.poll() is None:
+                            process.kill()
+                    except:
+                        pass
                     update_task_progress(task_id, 100, "error")
-                    ASYNC_TASKS[task_id]["result"] = "Timeout global Python dépassé (20h)"
+                    if task_id in ASYNC_TASKS:
+                        ASYNC_TASKS[task_id]["result"] = f"Timeout global dépassé ({elapsed_hours:.1f}h)"
                     break
 
-                # --- NOUVEAU : Surveillance active du process ---
+                # --- Surveillance active du process ---
                 if process.poll() is not None:
-                    logger.info(f"[WHISPER] Processus terminé avec code: {process.returncode} (PID: {process.pid})")
+                    elapsed_hours = (current_time - start_time) / 3600
+                    logger.info(f"[WHISPER] Processus terminé avec code: {process.returncode} après {elapsed_hours:.1f}h (PID: {process.pid})")
                     if process.returncode != 0:
                         update_task_progress(task_id, 100, "error")
-                        ASYNC_TASKS[task_id]["result"] = f"Processus Whisper terminé anormalement (code {process.returncode})"
+                        if task_id in ASYNC_TASKS:
+                            ASYNC_TASKS[task_id]["result"] = f"Processus Whisper terminé anormalement (code {process.returncode})"
                     else:
                         update_task_progress(task_id, 90, "finalizing")
                     break
@@ -344,8 +428,9 @@ def run_whisper_transcription(
                     stdout_lines.append(stdout_line.strip())
                     line_content = stdout_line.strip()
                     
-                    # Log toutes les lignes de stdout pour debug
-                    logger.debug(f"[WHISPER] STDOUT: {line_content}")
+                    # Log debug seulement pour les lignes importantes
+                    if any(keyword in line_content.lower() for keyword in ["error", "warning", "progress"]):
+                        logger.debug(f"[WHISPER] STDOUT: {line_content}")
 
                     # Analyse de la progression basée sur les logs de Whisper
                     if any(
@@ -358,12 +443,13 @@ def run_whisper_transcription(
                             25 + (progress_count * 2), 90
                         )  # 25-90%
 
-                        # Log tous les 100 segments
-                        if progress_count % 100 == 0:
-                            logger.info(f"[WHISPER] Progression: {progress_count} segments traités (PID: {process.pid})")
+                        # Log tous les 500 segments au lieu de 100
+                        if progress_count % 500 == 0:
+                            elapsed_hours = (current_time - start_time) / 3600
+                            logger.info(f"[WHISPER] Progression: {progress_count} segments traités après {elapsed_hours:.1f}h (PID: {process.pid})")
 
-                        # Ne pas spammer les mises à jour, max 1 par seconde
-                        if time.time() - last_progress_update > 1.0:
+                        # Mise à jour moins fréquente: tous les 5% et max 1 toutes les 5 secondes
+                        if (estimated_progress - ASYNC_TASKS.get(task_id, {}).get("progress", 0) >= 5) and (time.time() - last_progress_update > 5.0):
                             update_task_progress(task_id, int(estimated_progress))
                             last_progress_update = time.time()
 
@@ -373,15 +459,18 @@ def run_whisper_transcription(
                         whisper_progress = int(percentage_match.group(1))
                         # Mapper le pourcentage de Whisper sur notre échelle 25-90%
                         our_progress = 25 + (whisper_progress * 65 / 100)
-                        update_task_progress(task_id, int(our_progress))
+                        if time.time() - last_progress_update > 5.0:
+                            update_task_progress(task_id, int(our_progress))
+                            last_progress_update = time.time()
 
                 if stderr_line:
                     last_activity_time = current_time  # Activité détectée aussi sur stderr
                     stderr_lines.append(stderr_line.strip())
                     line_content = stderr_line.strip()
                     
-                    # Log toutes les lignes de stderr pour debug
-                    logger.debug(f"[WHISPER] STDERR: {line_content}")
+                    # Log seulement les erreurs et avertissements importants
+                    if any(keyword in line_content.lower() for keyword in ["error", "warning", "failed"]):
+                        logger.warning(f"[WHISPER] STDERR: {line_content}")
 
                     # Logs d'erreur et de progression depuis stderr
                     if "error" in line_content.lower():
@@ -396,23 +485,34 @@ def run_whisper_transcription(
                         elif "processing" in line_content.lower():
                             update_task_progress(task_id, 35)
 
-            # Phase finale
+            # Phase finale - SUPPRESSION DU TIMEOUT SUBPROCESS
             update_task_progress(task_id, 90, "finalizing")
-            remaining_stdout, remaining_stderr = process.communicate(timeout=86400)
+            
+            # PAS DE TIMEOUT sur communicate() pour permettre transcriptions très longues
+            remaining_stdout, remaining_stderr = process.communicate()  # timeout supprimé!
             stdout_lines.extend(remaining_stdout.splitlines())
             stderr_lines.extend(remaining_stderr.splitlines())
 
-        except subprocess.TimeoutExpired:
-            logger.error(f"[WHISPER] Timeout du process Whisper (1h) - PID: {process.pid}")
-            process.kill()
-            raise Exception("Timeout du process Whisper (1h)")
+        except Exception as e:
+            logger.error(f"[WHISPER] Exception dans la boucle de monitoring: {e}")
+            try:
+                process.terminate()
+                time.sleep(3)
+                if process.poll() is None:
+                    process.kill()
+            except:
+                pass
+            raise
 
         stdout = "\n".join(stdout_lines)
         stderr = "\n".join(stderr_lines)
         result = subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
 
     finally:
-        os.unlink(temp_file_path)
+        try:
+            os.unlink(temp_file_path)
+        except:
+            pass
 
     if result.returncode != 0:
         logger.error(f"[WHISPER] Erreur Whisper: {result.stderr}")
@@ -441,7 +541,7 @@ def run_whisper_transcription(
 
     processing_time = time.time() - start_time
     logger.info(
-        f"[WHISPER] Fin run_whisper_transcription, durée: {processing_time:.2f}s"
+        f"[WHISPER] Fin run_whisper_transcription, durée: {processing_time/3600:.2f}h ({processing_time:.0f}s)"
     )
 
     return {
@@ -461,7 +561,8 @@ def health():
             "status": "healthy",
             "timestamp": datetime.now().isoformat(),
             "model": "whisper-base-fr",
-            "version": "1.0.0",
+            "version": "1.0.0-longue-duree",
+            "max_transcription_hours": MAX_TRANSCRIPTION_TIME / 3600,
         }
     )
 
@@ -589,6 +690,7 @@ def transcribe_async():
             "task_id": task_id,
             "status_url": f"/transcription-status/{task_id}",
             "status": "pending",
+            "max_duration_hours": MAX_TRANSCRIPTION_TIME / 3600,
         }
     )
 
@@ -598,14 +700,14 @@ def reset_transcriptions():
     """Réinitialiser le compteur de transcriptions actives (debug)"""
     global ACTIVE_TRANSCRIPTIONS, ASYNC_TASKS
     
-    # Nettoyer les tâches fantômes (plus de 2h)
+    # Nettoyer les tâches fantômes (plus de 25h pour laisser marge aux longues transcriptions)
     current_time = time.time()
     tasks_to_remove = []
     
     for task_id, task in ASYNC_TASKS.items():
         if task.get("status") == "processing":
             created_time = datetime.fromisoformat(task.get("created_at", "2020-01-01T00:00:00"))
-            if (current_time - created_time.timestamp()) > 86400:  # 24h
+            if (current_time - created_time.timestamp()) > 90000:  # 25h
                 tasks_to_remove.append(task_id)
     
     for task_id in tasks_to_remove:
@@ -632,212 +734,96 @@ def transcription_status(task_id):
     if not task:
         return jsonify({"error": "Tâche inconnue"}), 404
 
+    # Calculer la durée écoulée
+    created_at = task.get("created_at")
+    elapsed_time = None
+    if created_at:
+        try:
+            created_time = datetime.fromisoformat(created_at)
+            elapsed_seconds = (datetime.now() - created_time).total_seconds()
+            elapsed_time = f"{elapsed_seconds/3600:.1f}h"
+        except:
+            pass
+
     response = {
         "task_id": task_id,
         "status": task["status"],
         "progress": task.get("progress", 0),
-        "created_at": task.get("created_at"),
+        "created_at": created_at,
+        "elapsed_time": elapsed_time,
+        "max_duration_hours": MAX_TRANSCRIPTION_TIME / 3600,
     }
 
-    # Inclure le résultat seulement si la tâche est terminée
+    # Ajouter le résultat si la tâche est terminée
     if task["status"] in ["completed", "error"]:
-        response["result"] = task["result"]
+        response["result"] = task.get("result")
 
     return jsonify(response)
 
 
-# === AUTRES ENDPOINTS ===
-@app.route("/transcribe/file", methods=["POST"])
-def transcribe_file():
-    global ACTIVE_TRANSCRIPTIONS
-    start_time = time.time()
-
-    if ACTIVE_TRANSCRIPTIONS >= MAX_CONCURRENT_TRANSCRIPTIONS:
-        return (
-            jsonify(
-                {
-                    "error": "Transcription en cours, veuillez réessayer dans quelques minutes"
-                }
-            ),
-            429,
-        )
-
-    try:
-        ACTIVE_TRANSCRIPTIONS += 1
-        if "audio_file" not in request.files:
-            return jsonify({"error": "Aucun fichier audio fourni"}), 400
-
-        audio_file = request.files["audio_file"]
-        if audio_file.filename == "":
-            return jsonify({"error": "Aucun fichier sélectionné"}), 400
-
-        language = request.form.get("language", "fr")
-        model = request.form.get("model", "base")
-        output_format = request.form.get("output_format", "txt").lower()
-
-        logger.info(f"Début transcription fichier: {audio_file.filename}")
-
-        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as temp_file:
-            audio_file.save(temp_file.name)
-            temp_file_path = temp_file.name
-            file_size = os.path.getsize(temp_file_path)
-
-        logger.info(f"Fichier sauvegardé: {temp_file_path} ({file_size} bytes)")
-
-        model_path = f"{WHISPER_PATH}/models/ggml-{model}.bin"
-        if not os.path.exists(model_path):
-            model_path = MODEL_PATH
-
-        cmd = build_whisper_cmd(
-            WHISPER_PATH,
-            model_path,
-            temp_file_path,
-            language,
-            output_format,
-            no_timestamps=(output_format == "txt"),
-            word_thold=float(request.form.get("word_thold", 0.005)),
-            no_speech_thold=float(request.form.get("no_speech_thold", 0.40)),
-            prompt=request.form.get("prompt"),
-        )
-
-        logger.info(f"Exécution: {' '.join(cmd)}")
-
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            cwd=WHISPER_PATH,
-            bufsize=1,
-            universal_newlines=True,
-        )
-
-        try:
-            stdout_lines = []
-            stderr_lines = []
-
-            while True:
-                stdout_line = process.stdout.readline() if process.stdout else None
-                stderr_line = process.stderr.readline() if process.stderr else None
-
-                if stdout_line:
-                    stdout_lines.append(stdout_line.strip())
-                if stderr_line:
-                    stderr_lines.append(stderr_line.strip())
-                if process.poll() is not None:
-                    break
-
-            remaining_stdout, remaining_stderr = process.communicate()
-            stdout_lines.extend(remaining_stdout.splitlines())
-            stderr_lines.extend(remaining_stderr.splitlines())
-
-            stdout = "\n".join(stdout_lines)
-            stderr = "\n".join(stderr_lines)
-            result = subprocess.CompletedProcess(
-                cmd, process.returncode, stdout, stderr
-            )
-
-        except subprocess.TimeoutExpired:
-            process.kill()
-            raise
-
-        os.unlink(temp_file_path)
-
-        if result.returncode != 0:
-            logger.error(f"Erreur Whisper: {result.stderr}")
-            return jsonify({"error": f"Erreur transcription: {result.stderr}"}), 500
-
-        transcription = None
-        if result.stdout and result.stdout.strip() and output_format == "txt":
-            transcription = result.stdout.strip()
-        else:
-            base_filename = os.path.basename(temp_file_path)
-            ext = f".{output_format}"
-            output_filename = base_filename.replace(".mp3", ext)
-            output_file = os.path.join(WHISPER_PATH, output_filename)
-
-            if os.path.exists(output_file):
-                with open(output_file, "r", encoding="utf-8") as f:
-                    transcription = f.read().strip()
-                os.unlink(output_file)
-            else:
-                return (
-                    jsonify({"error": "Fichier de sortie non trouvé et STDOUT vide"}),
-                    500,
-                )
-
-        processing_time = time.time() - start_time
-        cleanup_old_transcriptions()
-
-        if len(transcription) > 2000:
-            audio_filename = audio_file.filename or "audio"
-            audio_base = os.path.splitext(secure_filename(audio_filename))[0]
-            transcription_id = str(uuid.uuid4())
-            output_dir = "/var/log/whisper"
-            os.makedirs(output_dir, exist_ok=True)
-            output_path = os.path.join(
-                output_dir, f"{audio_base}__{transcription_id}.{output_format}"
-            )
-            with open(output_path, "w", encoding="utf-8") as f:
-                f.write(transcription)
-            transcription_url = (
-                request.url_root.rstrip("/")
-                + f"/transcriptions/{audio_base}__{transcription_id}.{output_format}"
-            )
-            return jsonify(
-                {
-                    "success": True,
-                    "transcription_url": transcription_url,
-                    "model": f"whisper-{model}-{language}",
-                    "processing_time": processing_time,
-                    "file_size": file_size,
-                    "filename": audio_file.filename,
-                }
-            )
-        else:
-            return jsonify(
-                {
-                    "success": True,
-                    "transcription": transcription,
-                    "model": f"whisper-{model}-{language}",
-                    "processing_time": processing_time,
-                    "file_size": file_size,
-                    "filename": audio_file.filename,
-                }
-            )
-
-    except Exception as e:
-        logger.error(f"Erreur inattendue: {e}")
-        return jsonify({"error": str(e)}), 500
-    finally:
-        ACTIVE_TRANSCRIPTIONS -= 1
-
-
-@app.route("/transcriptions/<path:transcription_file>", methods=["GET"])
-def get_transcription_file(transcription_file):
+@app.route("/transcriptions/<filename>", methods=["GET"])
+def download_transcription(filename):
+    """Télécharger un fichier de transcription"""
     output_dir = "/var/log/whisper"
-    return send_from_directory(output_dir, transcription_file, as_attachment=True)
+    file_path = os.path.join(output_dir, filename)
+    
+    if not os.path.exists(file_path):
+        return jsonify({"error": "Fichier non trouvé"}), 404
+    
+    return send_from_directory(output_dir, filename, as_attachment=True)
 
 
-@app.route("/transcriptions-list", methods=["GET"])
-def list_transcriptions():
-    output_dir = "/var/log/whisper"
-    base_url = request.url_root.rstrip("/") + "/transcriptions/"
-    if not os.path.exists(output_dir):
-        return jsonify([])
-    files = [
-        f for f in os.listdir(output_dir) if os.path.isfile(os.path.join(output_dir, f))
-    ]
-    result = [{"filename": f, "url": base_url + f} for f in files]
-    return jsonify(result)
+@app.route("/tasks", methods=["GET"])
+def list_tasks():
+    """Lister toutes les tâches asynchrones"""
+    tasks = []
+    for task_id, task in ASYNC_TASKS.items():
+        task_info = {
+            "task_id": task_id,
+            "status": task["status"],
+            "progress": task.get("progress", 0),
+            "created_at": task.get("created_at"),
+        }
+        
+        # Calculer la durée écoulée
+        created_at = task.get("created_at")
+        if created_at:
+            try:
+                created_time = datetime.fromisoformat(created_at)
+                elapsed_seconds = (datetime.now() - created_time).total_seconds()
+                task_info["elapsed_time"] = f"{elapsed_seconds/3600:.1f}h"
+            except:
+                pass
+        
+        # Ajouter le résultat si la tâche est terminée
+        if task["status"] in ["completed", "error"]:
+            task_info["result"] = task.get("result")
+        
+        tasks.append(task_info)
+    
+    return jsonify({
+        "tasks": tasks,
+        "total": len(tasks),
+        "active_transcriptions": ACTIVE_TRANSCRIPTIONS
+    })
 
 
 if __name__ == "__main__":
-    if not os.path.exists(MODEL_PATH):
-        logger.error(f"Modèle non trouvé: {MODEL_PATH}")
-        exit(1)
-
-    logger.info(f"Service Whisper démarré avec le modèle: {MODEL_PATH}")
+    # Nettoyer les anciennes transcriptions au démarrage
+    cleanup_old_transcriptions()
     
-    # Configuration production
-    app.run(host="0.0.0.0", port=8080, debug=False, threaded=True)
+    print("🚀 Démarrage du service Whisper - La Boîte de Chocolat")
+    print(f"📁 Whisper path: {WHISPER_PATH}")
+    print(f"🤖 Modèle: {os.path.basename(MODEL_PATH)}")
+    print(f"⏱️  Timeout max: {MAX_TRANSCRIPTION_TIME/3600:.1f}h")
+    print(f"🔄 Transcriptions concurrentes max: {MAX_CONCURRENT_TRANSCRIPTIONS}")
+    print("=" * 60)
+    
+    # Démarrer le serveur Flask
+    app.run(
+        host="0.0.0.0",
+        port=8080,
+        debug=False,
+        threaded=True,
+        use_reloader=False
+    )

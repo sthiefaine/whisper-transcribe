@@ -1,0 +1,37 @@
+# Configuration Coolify pour transcriptions longues
+# Ce fichier doit être placé dans le répertoire racine du projet
+
+# Désactiver les timeouts automatiques de Coolify
+timeout:
+  build: 1800  # 30 minutes pour le build
+  deploy: 300  # 5 minutes pour le déploiement
+  healthcheck: 300  # 5 minutes pour healthcheck
+
+# Configuration des ressources
+resources:
+  whisper-api:
+    memory: 16G
+    cpu: 4.0
+    # Pas de timeout sur les processus
+    process_timeout: 0  # Désactiver le timeout des processus
+
+# Configuration réseau
+network:
+  # Augmenter les timeouts de connexion
+  connection_timeout: 86400  # 24h
+  read_timeout: 86400        # 24h
+  write_timeout: 86400       # 24h
+
+# Configuration des logs
+logging:
+  # Garder les logs plus longtemps
+  max_size: 100m
+  max_files: 10
+
+# Configuration de surveillance
+monitoring:
+  # Désactiver les alertes de timeout pour ce service
+  timeout_alerts: false
+  # Augmenter les seuils d'alerte
+  memory_threshold: 90  # 90% au lieu de 80%
+  cpu_threshold: 90     # 90% au lieu de 80% 

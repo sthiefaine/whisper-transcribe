@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  whisper-api:
+    build: .
+    ports:
+      - "8080:8080"  # Port direct sans nginx
+    environment:
+      - FLASK_ENV=development
+      - PYTHONUNBUFFERED=1
+      - PYTHONHASHSEED=random
+      - PYTHONDONTWRITEBYTECODE=1
+    volumes:
+      - ./models:/opt/whisper.cpp/models  # Monter les modèles locaux
+      - ./logs:/var/log/whisper
+      - ./data:/data  # Pour les fichiers de test
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 8G   # Limite adaptée pour MacBook
+          cpus: '4.0'  # 4 cores
+        reservations:
+          memory: 4G
+          cpus: '2.0'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # Nginx optionnel pour le local
+  nginx:
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile
+    ports:
+      - "8090:80"  # Port différent pour éviter conflits
+    depends_on:
+      - whisper-api
+    restart: unless-stopped 
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+    profiles:
+      - nginx  # Optionnel, pas démarré par défaut
+
+volumes:
+  whisper-models:
