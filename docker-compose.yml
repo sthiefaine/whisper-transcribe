@@ -1,65 +1,44 @@
 version: '3.8'
 
 services:
-  whisper-api:
-    build: .
-    ports:
-      - "8090:8080"
+  scriberr:
+    image: ghcr.io/rishikanthc/scriberr:latest
+    container_name: scriberr
+    # Port mapping retiré - Coolify gère le routing via Traefik
+    # Le port interne reste 8080, Coolify le route automatiquement
+    expose:
+      - "8080"
     environment:
-      - FLASK_ENV=production
-      - PYTHONUNBUFFERED=1
-      - PYTHONHASHSEED=random
-      - PYTHONDONTWRITEBYTECODE=1
+      - DB_PATH=/app/data/scriberr.db
+      - UPLOAD_DIR=/app/data/uploads
+      - HF_TOKEN=${HF_TOKEN:-}
+      - PORT=8080
     volumes:
-      - whisper-models:/opt/whisper.cpp/models
-      - ./logs:/var/log/whisper
-    restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          memory: 8G   # Strict 8GB limit for large file transcription
-          cpus: '2.5'  # Max 2.5 CPU cores as requested
-        reservations:
-          memory: 4G   
-          cpus: '1.0'
-      restart_policy:
-        condition: on-failure
-        delay: 5s
-        max_attempts: 3
-        window: 120s
+      - ./data:/app/data
+    restart: always
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
-      interval: 60s    # Augmenté de 30s à 60s
-      timeout: 30s     # Augmenté de 10s à 30s
-      retries: 5       # Augmenté de 3 à 5
-      start_period: 120s  # Augmenté de 40s à 120s
+      # Healthcheck avec fallback: curl ou wget
+      # start_period augmenté à 5 minutes car le service télécharge des modèles au démarrage
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/health 2>/dev/null || wget --no-verbose --tries=1 --spider http://localhost:8080/health 2>/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 300s  # 5 minutes pour laisser le temps de télécharger les modèles
     networks:
       - coolify
-    # Configuration pour éviter les timeouts Coolify
-    stop_grace_period: 300s  # 5 minutes pour arrêt gracieux
-    stop_signal: SIGTERM
-
-  nginx:
-    build:
-      context: ./nginx
-      dockerfile: Dockerfile
-    ports:
-      - "90:80"
-      - "4443:443"
-    depends_on:
-      - whisper-api
-    restart: unless-stopped 
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: '0.5'
-    networks:
-      - coolify
+    # IMPORTANT: Ne pas ajouter de labels Traefik manuels
+    # Coolify gère automatiquement le routing via Traefik quand le domaine est configuré dans l'interface
+    # Les labels manuels peuvent entrer en conflit avec la configuration automatique de Coolify
+    # Option GPU NVIDIA (décommentez si vous avez une GPU)
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+    stop_grace_period: 60s
 
 networks:
   coolify:
     external: true
-
-volumes:
-  whisper-models:

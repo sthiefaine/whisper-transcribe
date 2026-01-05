@@ -7,6 +7,8 @@ __pycache__/
 env/
 venv/
 .venv/
+.env
+env
 
 # Logs
 logs/
@@ -31,4 +33,10 @@ ssl/
 
 # Temporary files
 *.tmp
-*.temp 
+*.temp
+
+# Scriberr data
+data/
+backups/
+*.db
+*.db-journal 

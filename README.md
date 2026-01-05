@@ -1,259 +1,287 @@
-# Whisper Transcription API
+# Scriberr - Service de Transcription Audio
 
-API de transcription audio utilisant Whisper.cpp pour convertir des fichiers audio en texte avec support de multiples formats de sortie.
+Service de transcription audio moderne utilisant Scriberr (WhisperX optimisé) pour gérer les longs podcasts sans problème. Optimisé pour les serveurs Linux/Hetzner avec Coolify.
 
-## Fonctionnalités
+## 🚀 Fonctionnalités
 
-- Transcription audio en temps réel et asynchrone
-- Support de multiples formats de sortie (TXT, SRT, VTT)
-- Gestion automatique du nettoyage des fichiers (>24h)
-- Limitation de concurrence (1 transcription à la fois)
-- Support de multiples modèles Whisper
-- Interface web simple pour upload de fichiers
+- ✅ Transcription de longs podcasts (optimisé WhisperX)
+- ✅ Diarisation (identification des locuteurs) avec HuggingFace
+- ✅ Interface web moderne
+- ✅ API REST complète
+- ✅ Support GPU NVIDIA (optionnel)
+- ✅ Déploiement Docker Compose simple
+- ✅ Prêt pour Coolify/Hetzner
 
-## Installation et Déploiement
+## 📋 Prérequis
 
-### Prérequis
+- Docker et Docker Compose installés
+- Serveur Linux (Ubuntu/Debian recommandé)
+- Optionnel : Token HuggingFace pour la diarisation (gratuit)
 
-- Docker et Docker Compose
-- Modèles Whisper (téléchargés automatiquement ou manuellement)
+## 🔧 Installation Rapide
 
-### Déploiement
+### Étape 1 : Préparation du serveur
 
-1. Clonez le repository
-2. Configurez les variables d'environnement (voir `env.example`)
-3. Lancez avec Docker Compose :
 ```bash
-docker-compose up -d
+# Vérifier Docker
+docker --version
+docker-compose --version
+
+# Cloner ou naviguer vers le projet
+cd ~/scriberr  # ou votre répertoire
 ```
 
-## Documentation API pour LLM
+### Étape 2 : Configuration
 
-### Endpoints Principaux
-
-#### 1. POST /transcribe
-Transcription synchrone d'un fichier audio depuis une URL.
-
-**Paramètres JSON :**
-```json
-{
-  "audio_url": "https://example.com/audio.mp3",
-  "language": "fr",
-  "model": "large-v3-turbo-q8_0",
-  "output_format": "srt",
-  "word_thold": 0.005,
-  "no_speech_thold": 0.40
-}
+1. **Copier le fichier d'environnement :**
+```bash
+cp .env.example .env
 ```
 
-**Paramètres :**
-- `audio_url` (requis) : URL du fichier audio à transcrire
-- `language` (optionnel) : Code langue (défaut: "fr")
-- `model` (optionnel) : Modèle Whisper (défaut: "base")
-- `output_format` (optionnel) : Format de sortie ("txt", "srt", "vtt", défaut: "txt")
-- `word_thold` (optionnel) : Seuil de confiance des mots (défaut: 0.005)
-- `no_speech_thold` (optionnel) : Seuil de détection de parole (défaut: 0.40)
-- `prompt` (optionnel) : Contexte initial pour améliorer la transcription (ex: "podcast cinéma Avatar")
-
-**Réponse :**
-```json
-{
-  "transcription": "Contenu transcrit...",
-  "transcription_url": "https://api.example.com/transcriptions/fichier__uuid.txt",
-  "model_used": "large-v3-turbo-q8_0",
-  "language": "fr",
-  "processing_time": 12.5
-}
+2. **Éditer `.env` et ajouter votre token HuggingFace (optionnel mais recommandé) :**
+```bash
+nano .env
 ```
 
-#### 2. POST /transcribe/file
-Transcription synchrone d'un fichier audio uploadé.
+Obtenez votre token gratuit sur [HuggingFace Settings](https://huggingface.co/settings/tokens)
 
-**Paramètres Form-Data :**
-- `audio_file` (requis) : Fichier audio
-- `language` (optionnel) : Code langue
-- `model` (optionnel) : Modèle Whisper
-- `output_format` (optionnel) : Format de sortie
-- `word_thold` (optionnel) : Seuil de confiance des mots
-- `no_speech_thold` (optionnel) : Seuil de détection de parole
+### Étape 3 : Déploiement
 
-**Réponse :** Identique à `/transcribe`
+```bash
+# Rendre le script exécutable (si pas déjà fait)
+chmod +x deploy.sh
 
-#### 3. POST /transcribe-async
-Transcription asynchrone pour fichiers longs.
-
-**Paramètres JSON :**
-```json
-{
-  "audio_url": "https://example.com/long-audio.mp3",
-  "language": "fr",
-  "model": "large-v3-turbo-q8_0",
-  "output_format": "srt",
-  "word_thold": 0.005,
-  "no_speech_thold": 0.40
-}
+# Démarrer Scriberr
+./deploy.sh up
 ```
 
-**Réponse initiale :**
-```json
-{
-  "task_id": "uuid-task-id",
-  "status_url": "/transcription-status/uuid-task-id"
-}
-```
+### Étape 4 : Accès
 
-#### 4. GET /transcription-status/{task_id}
-Vérification du statut d'une transcription asynchrone.
+Accédez à l'interface web :
+- **Local** : http://localhost:8080
+- **Serveur distant** : http://VOTRE_IP:8080
 
-**Réponse :**
-```json
-{
-  "status": "processing",
-  "progress": 45,
-  "result": null
-}
-```
+## 📖 Utilisation
 
-**Statuts possibles :**
-- `pending` : En attente
-- `processing` : En cours (avec pourcentage)
-- `completed` : Terminé
-- `failed` : Échec
+### Interface Web
 
-**Réponse finale (completed) :**
-```json
-{
-  "status": "completed",
-  "progress": 100,
-  "result": {
-    "transcription": "Contenu transcrit...",
-    "transcription_url": "https://api.example.com/transcriptions/fichier__uuid.srt",
-    "model_used": "large-v3-turbo-q8_0",
-    "language": "fr",
-    "processing_time": 125.3
-  }
-}
-```
+1. Ouvrez http://VOTRE_IP:8080 dans votre navigateur
+2. Uploadez votre fichier audio (MP3, WAV, M4A, etc.)
+3. Configurez les options (langue, diarisation, etc.)
+4. Lancez la transcription
+5. Téléchargez le résultat (TXT, SRT, VTT)
 
-#### 5. GET /health
-Vérification de l'état de l'API.
-
-**Réponse :**
-```json
-{
-  "status": "healthy",
-  "active_transcriptions": 0,
-  "max_concurrent": 1
-}
-```
-
-#### 6. GET /transcriptions/{filename}
-Téléchargement d'un fichier de transcription.
-
-### Modèles Disponibles
-
-- `base` : Modèle de base (rapide, moins précis)
-- `small` : Modèle petit (équilibré)
-- `medium` : Modèle moyen (bon équilibre)
-- `large-v3` : Modèle large (très précis, lent)
-- `large-v3-turbo-q8_0` : Modèle large optimisé (recommandé)
-
-### Formats de Sortie
-
-#### TXT (texte simple)
-```
-Maman disait toujours, la vie c'est comme une boîte de chocolat.
-On ne sait jamais sur quoi on va tomber.
-```
-
-#### SRT (sous-titres)
-```
-1
-00:00:00,500 --> 00:00:04,880
-Maman disait toujours, la vie c'est comme une boîte de chocolat.
-
-2
-00:00:04,880 --> 00:00:07,800
-On ne sait jamais sur quoi on va tomber.
-```
-
-#### VTT (WebVTT)
-```
-WEBVTT
-
-00:00:00.500 --> 00:00:04.880
-Maman disait toujours, la vie c'est comme une boîte de chocolat.
-
-00:00:04.880 --> 00:00:07.800
-On ne sait jamais sur quoi on va tomber.
-```
-
-### Codes d'Erreur
-
-- `400 Bad Request` : Paramètres manquants ou invalides
-- `429 Too Many Requests` : Transcription déjà en cours
-- `500 Internal Server Error` : Erreur serveur
-
-### Exemples d'Utilisation
+### API REST
 
 #### Transcription simple
-```bash
-curl -X POST -H "Content-Type: application/json" -d '{
-  "audio_url": "https://example.com/audio.mp3",
-  "language": "fr",
-  "output_format": "srt",
-  "prompt": "podcast cinéma Avatar James Cameron"
-}' http://api.example.com/transcribe
-```
 
-#### Transcription asynchrone
 ```bash
-# Démarrer la transcription
-curl -X POST -H "Content-Type: application/json" -d '{
-  "audio_url": "https://example.com/long-audio.mp3",
-  "model": "large-v3-turbo-q8_0",
-  "output_format": "vtt",
-  "prompt": "intelligence artificielle machine learning"
-}' http://api.example.com/transcribe-async
-
-# Vérifier le statut
-curl http://api.example.com/transcription-status/task-id
-```
-
-#### Upload de fichier
-```bash
-curl -X POST -F "audio_file=@local-audio.mp3" \
+curl -X POST http://VOTRE_IP:8080/api/transcribe \
+  -H "Content-Type: multipart/form-data" \
+  -F "file=@votre_audio.mp3" \
   -F "language=fr" \
-  -F "output_format=srt" \
-  -F "prompt=gastronomie cuisine française" \
-  http://api.example.com/transcribe/file
+  -F "diarize=true"
 ```
 
-### Limitations
+#### Transcription avec diarisation
 
-- **Concurrence** : Maximum 1 transcription simultanée
-- **Taille de fichier** : Limite selon la configuration Nginx
-- **Durée** : Pas de limite, mais recommandé <2h pour synchrone
-- **Nettoyage** : Fichiers supprimés automatiquement après 24h
+```bash
+curl -X POST http://VOTRE_IP:8080/api/transcribe \
+  -H "Content-Type: multipart/form-data" \
+  -F "file=@podcast.mp3" \
+  -F "language=fr" \
+  -F "diarize=true" \
+  -F "num_speakers=2"
+```
 
-### Architecture
+## 🐳 Déploiement avec Coolify
 
-- **API Flask** : Gestion des requêtes HTTP
-- **Whisper.cpp** : Moteur de transcription
-- **Nginx** : Reverse proxy et gestion des fichiers statiques
-- **Docker** : Conteneurisation et déploiement
+### Méthode 1 : Docker Compose dans Coolify
 
-### Variables d'Environnement
+1. **Dans Coolify Dashboard :**
+   - New Service > Docker Compose
+   - Upload votre `docker-compose.yml`
 
-- `WHISPER_PATH` : Chemin vers Whisper.cpp
-- `MODEL_PATH` : Chemin vers les modèles
-- `MAX_CONCURRENT_TRANSCRIPTIONS` : Limite de concurrence
-- `CLEANUP_HOURS` : Âge des fichiers avant suppression
+2. **Variables d'environnement :**
+   - Ajoutez `HF_TOKEN` si vous utilisez la diarisation
+   - Coolify gère automatiquement le routing (pas besoin de configurer le port)
 
-## Interface Web
+3. **Important :** 
+   - Le port n'est pas mappé dans docker-compose.yml (Coolify gère via Traefik)
+   - Si vous avez un conflit de port, arrêtez l'ancien service Whisper d'abord
 
-Accédez à `http://api.example.com/` pour l'interface web permettant l'upload de fichiers audio et la sélection des paramètres de transcription.
+4. **Déployer :**
+   - Cliquez sur Deploy
+   - Attendez que le healthcheck passe (40s max)
+   - Accédez via le domaine configuré dans Coolify
 
-## Support
+### Méthode 2 : Script de déploiement
 
-Pour toute question ou problème, consultez les logs Docker ou ouvrez une issue sur le repository. 
+```bash
+# Sur votre serveur
+./deploy.sh up
+```
+
+## 🛠️ Commandes Utiles
+
+### Gestion du service
+
+```bash
+# Démarrer
+./deploy.sh up
+
+# Arrêter
+./deploy.sh down
+
+# Voir les logs
+./deploy.sh logs
+
+# Sauvegarder les données
+./deploy.sh backup
+
+# Restaurer depuis une sauvegarde
+./deploy.sh restore ./backups/scriberr_backup_20240101_120000.tar.gz
+```
+
+### Commandes Docker directes
+
+```bash
+# Voir les logs
+docker-compose logs -f
+
+# Redémarrer
+docker-compose restart
+
+# Voir le statut
+docker-compose ps
+
+# Accéder au conteneur
+docker exec -it scriberr sh
+```
+
+## 📁 Structure des Données
+
+```
+.
+├── docker-compose.yml    # Configuration Docker Compose
+├── .env                  # Variables d'environnement (à créer)
+├── .env.example          # Exemple de configuration
+├── deploy.sh             # Script de déploiement
+├── data/                 # Données persistantes
+│   ├── scriberr.db      # Base de données
+│   └── uploads/         # Fichiers uploadés
+└── backups/              # Sauvegardes (créé automatiquement)
+```
+
+## ⚙️ Configuration Avancée
+
+### Support GPU NVIDIA
+
+Pour activer le support GPU, décommentez la section dans `docker-compose.yml` :
+
+```yaml
+deploy:
+  resources:
+    reservations:
+      devices:
+        - driver: nvidia
+          count: 1
+          capabilities: [gpu]
+```
+
+**Prérequis :**
+- NVIDIA Docker runtime installé
+- GPU compatible CUDA
+
+### Variables d'environnement
+
+| Variable | Description | Défaut |
+|----------|-------------|--------|
+| `HF_TOKEN` | Token HuggingFace pour diarisation | (vide) |
+| `PORT` | Port d'écoute | `8080` |
+| `DB_PATH` | Chemin de la base de données | `/app/data/scriberr.db` |
+| `UPLOAD_DIR` | Répertoire d'upload | `/app/data/uploads` |
+
+## 🔒 Sécurité
+
+- Les fichiers uploadés sont stockés localement dans `./data/uploads`
+- La base de données est dans `./data/scriberr.db`
+- Configurez un reverse proxy (Nginx/Traefik) pour HTTPS en production
+- Utilisez des variables d'environnement pour les tokens sensibles
+
+## 🐛 Dépannage
+
+### Le service ne démarre pas
+
+```bash
+# Vérifier les logs
+./deploy.sh logs
+
+# Vérifier les ports
+netstat -tulpn | grep 8080
+
+# Vérifier Docker
+docker ps -a
+```
+
+### Erreur de diarisation
+
+- Vérifiez que `HF_TOKEN` est correctement configuré dans `.env`
+- Vérifiez que le token est valide sur HuggingFace
+- La diarisation fonctionne sans token mais avec des limitations
+
+### Problèmes de mémoire
+
+- Scriberr est optimisé pour les longs fichiers
+- Si problèmes, augmentez la RAM allouée à Docker
+- Considérez l'utilisation d'un GPU pour de meilleures performances
+
+## 📊 Performance
+
+- **CPU** : Transcription en temps réel × 0.5-1x (selon modèle)
+- **RAM** : ~2-4GB pour les fichiers moyens
+- **GPU** : Accélération significative si disponible
+- **Longs podcasts** : Optimisé pour fichiers >1h
+
+## 🔄 Migration depuis Whisper
+
+Si vous migrez depuis un ancien service Whisper :
+
+1. **Sauvegardez vos données :**
+```bash
+# Depuis l'ancien projet
+tar -czf whisper_backup.tar.gz ./logs ./models
+```
+
+2. **Déployez Scriberr :**
+```bash
+./deploy.sh up
+```
+
+3. **Migrez les transcriptions (optionnel) :**
+   - Utilisez l'API Scriberr pour re-transcrire si nécessaire
+   - Les anciens fichiers peuvent être uploadés via l'interface web
+
+## 📚 Ressources
+
+- [Scriberr GitHub](https://github.com/rishikanthc/scriberr)
+- [WhisperX Documentation](https://github.com/m-bain/whisperX)
+- [HuggingFace Tokens](https://huggingface.co/settings/tokens)
+
+## 📝 Notes
+
+- Les données sont persistantes dans `./data/`
+- Faites des sauvegardes régulières avec `./deploy.sh backup`
+- Le healthcheck vérifie `/health` toutes les 30s
+- Le service redémarre automatiquement en cas d'erreur
+
+## 🆘 Support
+
+Pour toute question ou problème :
+1. Vérifiez les logs : `./deploy.sh logs`
+2. Consultez la documentation Scriberr
+3. Vérifiez les issues GitHub du projet
+
+---
+
+**Fait avec ❤️ pour les longs podcasts**
