@@ -1,0 +1,21 @@
+# Web framework
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+python-multipart==0.0.6
+websockets==12.0
+
+# Whisper transcription
+faster-whisper==1.0.0
+
+# PyTorch (CPU version for smaller image)
+torch>=2.0.0
+torchaudio>=2.0.0
+
+# Speaker diarization
+pyannote.audio>=3.1.0
+
+# Utilities
+python-dotenv==1.0.0
+
+# Database (already included in Python stdlib)
+# sqlite3 is built-in
