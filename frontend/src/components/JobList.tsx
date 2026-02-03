@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
-import type { Job, ProgressUpdate } from '../types';
+import type { Job } from '../types';
 import { listJobs, deleteJob, resumeJob, cancelJob } from '../api/client';
 import { useJobProgress } from '../hooks/useWebSocket';
 import { JobCard } from './JobCard';
