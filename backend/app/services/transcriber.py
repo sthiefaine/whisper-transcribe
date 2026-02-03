@@ -1,10 +1,8 @@
 """
-Transcriber Service
-Wrapper around faster-whisper with memory-efficient processing
+Transcriber Service - Voxtral Transcribe 2 via Mistral AI API
 """
-import os
-import gc
-from typing import List, Dict, Optional
+from pathlib import Path
+from typing import Optional, Dict, Any, List
 from dataclasses import dataclass
 import logging
 
@@ -12,149 +10,101 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class TranscriptSegment:
-    start: float
-    end: float
+class TranscriptionResult:
     text: str
-    words: Optional[List[Dict]] = None
-    confidence: Optional[float] = None
-
-
-@dataclass
-class ChunkTranscript:
-    chunk_index: int
-    original_start_time: float
-    segments: List[TranscriptSegment]
+    segments: List[Dict[str, Any]]
     language: str
-    language_probability: float
+    num_speakers: Optional[int]
+    usage: Optional[Dict[str, Any]]
 
 
-class Transcriber:
+class VoxtralTranscriber:
     def __init__(
         self,
-        model_size: str = "large-v3",
-        device: str = "cpu",
-        compute_type: str = "int8",
-        download_root: Optional[str] = None,
-        cpu_threads: int = 4
+        api_key: str,
+        model: str = "voxtral-mini-latest",
+        timeout: int = 3600,
     ):
-        self.model_size = model_size
-        self.device = device
-        self.compute_type = compute_type
-        self.download_root = download_root or os.path.expanduser(
-            "~/.cache/huggingface/hub"
-        )
-        self.cpu_threads = cpu_threads
-        self._model = None
+        self.api_key = api_key
+        self.model = model
+        self.timeout = timeout
+        self._client = None
 
-    def load_model(self):
-        """Load model into memory (singleton pattern for reuse)"""
-        if self._model is not None:
-            return
+    def _get_client(self):
+        if self._client is None:
+            from mistralai import Mistral
+            self._client = Mistral(api_key=self.api_key)
+        return self._client
 
-        from faster_whisper import WhisperModel
-
-        logger.info(f"Loading Whisper model: {self.model_size}")
-        logger.info(f"Device: {self.device}, Compute type: {self.compute_type}")
-
-        self._model = WhisperModel(
-            self.model_size,
-            device=self.device,
-            compute_type=self.compute_type,
-            download_root=self.download_root,
-            cpu_threads=self.cpu_threads,
-            num_workers=1  # Single worker to limit memory
-        )
-
-        logger.info("Model loaded successfully")
-
-    def unload_model(self):
-        """Unload model to free memory"""
-        if self._model is not None:
-            del self._model
-            self._model = None
-            gc.collect()
-
-            # Try to clear CUDA cache if available
-            try:
-                import torch
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            except ImportError:
-                pass
-
-            logger.info("Model unloaded")
-
-    def transcribe_chunk(
+    async def transcribe(
         self,
         audio_path: str,
-        chunk_index: int,
-        original_start_time: float,
         language: Optional[str] = None,
-        task: str = "transcribe",
-        word_timestamps: bool = True,
-        vad_filter: bool = True
-    ) -> ChunkTranscript:
-        """Transcribe a single audio chunk"""
+        enable_diarization: bool = True,
+    ) -> TranscriptionResult:
+        """Send full audio file to Voxtral Transcribe 2 API."""
+        client = self._get_client()
 
-        if self._model is None:
-            self.load_model()
+        file_name = Path(audio_path).name
 
-        logger.info(f"Transcribing chunk {chunk_index}: {audio_path}")
+        logger.info(f"Sending {file_name} to Voxtral API (model={self.model}, diarize={enable_diarization})")
 
-        # Transcribe with VAD filter to skip silence
-        segments_gen, info = self._model.transcribe(
-            audio_path,
-            language=language,
-            task=task,
-            word_timestamps=word_timestamps,
-            vad_filter=vad_filter,
-            vad_parameters={
-                "min_silence_duration_ms": 500,
-                "speech_pad_ms": 200
-            },
-            beam_size=5,
-            best_of=5,
-            temperature=[0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
-            compression_ratio_threshold=2.4,
-            log_prob_threshold=-1.0,
-            no_speech_threshold=0.6,
-            condition_on_previous_text=True
+        with open(audio_path, "rb") as f:
+            # Note: timestamp_granularities and language cannot be used together
+            # So we use timestamp_granularities for segment timing when no language specified
+            response = await client.audio.transcriptions.complete_async(
+                model=self.model,
+                file={"content": f, "file_name": file_name},
+                diarize=enable_diarization,
+                timestamp_granularities=["segment"] if not language else None,
+                language=language,
+                timeout_ms=self.timeout * 1000,
+            )
+
+        # Parse segments
+        segments: List[Dict[str, Any]] = []
+        speakers_seen: set[str] = set()
+
+        if response.segments:
+            for seg in response.segments:
+                segment_dict: Dict[str, Any] = {
+                    "text": seg.text.strip(),
+                    "start": seg.start,
+                    "end": seg.end,
+                }
+                if enable_diarization and seg.speaker_id:
+                    segment_dict["speaker"] = seg.speaker_id
+                    speakers_seen.add(seg.speaker_id)
+                segments.append(segment_dict)
+
+        usage_dict = None
+        if response.usage:
+            usage_dict = {
+                "prompt_tokens": getattr(response.usage, "prompt_tokens", None),
+                "completion_tokens": getattr(response.usage, "completion_tokens", None),
+                "total_tokens": getattr(response.usage, "total_tokens", None),
+            }
+
+        logger.info(
+            f"Transcription complete: {len(segments)} segments, "
+            f"{len(speakers_seen)} speakers, lang={response.language}"
         )
 
-        # Convert generator to list of segments
-        transcript_segments: List[TranscriptSegment] = []
-        for segment in segments_gen:
-            words = None
-            if word_timestamps and hasattr(segment, 'words') and segment.words:
-                words = [
-                    {
-                        "word": w.word,
-                        "start": w.start,
-                        "end": w.end,
-                        "probability": w.probability
-                    }
-                    for w in segment.words
-                ]
-
-            transcript_segments.append(TranscriptSegment(
-                start=segment.start,
-                end=segment.end,
-                text=segment.text.strip(),
-                words=words,
-                confidence=getattr(segment, 'avg_logprob', None)
-            ))
-
-        logger.info(f"Chunk {chunk_index}: {len(transcript_segments)} segments transcribed")
-
-        return ChunkTranscript(
-            chunk_index=chunk_index,
-            original_start_time=original_start_time,
-            segments=transcript_segments,
-            language=info.language,
-            language_probability=info.language_probability
+        return TranscriptionResult(
+            text=response.text,
+            segments=segments,
+            language=response.language or language or "unknown",
+            num_speakers=len(speakers_seen) if speakers_seen else None,
+            usage=usage_dict,
         )
 
-    def is_loaded(self) -> bool:
-        """Check if model is loaded"""
-        return self._model is not None
+    @staticmethod
+    def _get_mime_type(path: str) -> str:
+        mime_map = {
+            ".mp3": "audio/mpeg",
+            ".wav": "audio/wav",
+            ".m4a": "audio/mp4",
+            ".flac": "audio/flac",
+            ".ogg": "audio/ogg",
+        }
+        return mime_map.get(Path(path).suffix.lower(), "audio/mpeg")

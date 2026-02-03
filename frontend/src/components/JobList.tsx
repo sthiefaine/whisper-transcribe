@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import type { Job } from '../types';
-import { listJobs, deleteJob, resumeJob, cancelJob } from '../api/client';
+import { listJobs, deleteJob, retryJob, cancelJob } from '../api/client';
 import { useJobProgress } from '../hooks/useWebSocket';
 import { JobCard } from './JobCard';
 
@@ -24,7 +24,7 @@ export function JobList({ onViewTranscript, refreshTrigger }: JobListProps) {
 
       // Find active job for WebSocket
       const activeJob = data.jobs.find((j) =>
-        ['pending', 'chunking', 'transcribing', 'diarizing', 'merging', 'processing'].includes(j.status)
+        ['pending', 'transcribing'].includes(j.status)
       );
       setActiveJobId(activeJob?.id || null);
 
@@ -64,12 +64,12 @@ export function JobList({ onViewTranscript, refreshTrigger }: JobListProps) {
     }
   };
 
-  const handleResume = async (jobId: string) => {
+  const handleRetry = async (jobId: string) => {
     try {
-      await resumeJob(jobId);
+      await retryJob(jobId);
       await fetchJobs();
     } catch (err) {
-      console.error('Failed to resume job:', err);
+      console.error('Failed to retry job:', err);
     }
   };
 
@@ -103,7 +103,7 @@ export function JobList({ onViewTranscript, refreshTrigger }: JobListProps) {
           job={job}
           progress={job.id === activeJobId ? progress : null}
           onView={() => onViewTranscript(job.id)}
-          onResume={() => handleResume(job.id)}
+          onRetry={() => handleRetry(job.id)}
           onCancel={() => handleCancel(job.id)}
           onDelete={() => handleDelete(job.id)}
         />

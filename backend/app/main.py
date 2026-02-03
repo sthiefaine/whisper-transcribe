@@ -1,5 +1,5 @@
 """
-Main FastAPI application
+Main FastAPI application - Voxtral Transcribe 2
 """
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,15 +8,13 @@ from typing import Optional, List
 import os
 import uuid
 import asyncio
-import shutil
+import subprocess
 from datetime import datetime
 import logging
 
 from .config import settings
 from .database import Database
-from .services.checkpoint import CheckpointManager
 from .services.job_processor import JobProcessor, ProcessingProgress
-from .services.audio_chunker import AudioChunker
 from .api.websocket import WebSocketManager
 
 # Configure logging
@@ -29,8 +27,8 @@ logger = logging.getLogger(__name__)
 # Initialize app
 app = FastAPI(
     title="Podcast Transcription API",
-    description="Robust chunk-based transcription with checkpoint support",
-    version="1.0.0"
+    description="Audio transcription powered by Voxtral Transcribe 2",
+    version="2.0.0"
 )
 
 # CORS
@@ -44,29 +42,42 @@ app.add_middleware(
 
 # Global instances
 db = Database(settings.db_path)
-checkpoint_manager = CheckpointManager(settings.checkpoint_db_path)
 ws_manager = WebSocketManager()
 
 # Active processors
 active_processors: dict[str, JobProcessor] = {}
 
 
+def get_audio_duration(file_path: str) -> Optional[float]:
+    """Get audio duration via ffprobe."""
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "quiet", "-show_entries",
+                "format=duration", "-of", "csv=p=0", file_path
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return float(result.stdout.strip())
+    except Exception as e:
+        logger.warning(f"Could not get audio duration: {e}")
+    return None
+
+
 # === LIFECYCLE ===
 
 @app.on_event("startup")
 async def startup_event():
-    """Startup: check for resumable jobs"""
-    logger.info("Starting Podcast Transcription API")
-    logger.info(f"Data directory: {settings.data_dir}")
-    logger.info(f"Model: {settings.model_size}")
-    logger.info(f"Device: {settings.device}")
+    """Startup: validate configuration"""
+    logger.info("Starting Podcast Transcription API (Voxtral)")
+    logger.info(f"Voxtral model: {settings.voxtral_model}")
+    logger.info(f"Diarization enabled: {settings.enable_diarization}")
 
-    # List resumable jobs (don't auto-resume, let user decide)
-    resumable = checkpoint_manager.get_resumable_jobs()
-    if resumable:
-        logger.info(f"Found {len(resumable)} resumable jobs:")
-        for job in resumable:
-            logger.info(f"  - {job.job_id} (status: {job.status})")
+    if not settings.mistral_api_key:
+        logger.error("MISTRAL_API_KEY not set! Transcription will fail.")
 
 
 # === UPLOAD ENDPOINTS ===
@@ -76,13 +87,12 @@ async def create_job(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     language: Optional[str] = Form(None),
-    model_size: str = Form("large-v3"),
     enable_diarization: bool = Form(True),
     num_speakers: Optional[int] = Form(None)
 ):
     """
     Upload an audio file and create a transcription job.
-    The job will be processed in the background with checkpoint support.
+    The job will be processed in the background via Voxtral API.
     """
     # Generate job ID
     job_id = str(uuid.uuid4())
@@ -103,14 +113,8 @@ async def create_job(
 
     logger.info(f"Uploaded file: {file.filename} ({file_size} bytes) -> {file_path}")
 
-    # Get audio duration
-    duration = None
-    try:
-        chunker = AudioChunker()
-        info = chunker.get_audio_info(file_path)
-        duration = info.duration
-    except Exception as e:
-        logger.warning(f"Could not get audio duration: {e}")
+    # Get audio duration via ffprobe
+    duration = get_audio_duration(file_path)
 
     # Create job record
     job = db.create_job(
@@ -119,7 +123,7 @@ async def create_job(
         original_path=file_path,
         file_size=file_size,
         duration_seconds=duration,
-        model_size=model_size,
+        model_size=settings.voxtral_model,
         language=language,
         enable_diarization=enable_diarization,
         num_speakers=num_speakers
@@ -131,7 +135,6 @@ async def create_job(
         job_id=job_id,
         audio_path=file_path,
         language=language,
-        model_size=model_size,
         enable_diarization=enable_diarization,
         num_speakers=num_speakers
     )
@@ -150,7 +153,6 @@ async def process_job_background(
     job_id: str,
     audio_path: str,
     language: Optional[str],
-    model_size: str,
     enable_diarization: bool,
     num_speakers: Optional[int]
 ):
@@ -161,22 +163,15 @@ async def process_job_background(
         db.update_job_status(
             job_id=progress.job_id,
             status='processing' if progress.status != 'completed' else 'completed',
-            current_chunk=progress.current_chunk,
-            completed_chunks=progress.current_chunk if progress.current_phase != 'chunking' else 0
         )
         # Broadcast via WebSocket
         asyncio.create_task(ws_manager.broadcast_progress(progress))
 
     processor = JobProcessor(
-        data_dir=settings.data_dir,
-        checkpoint_manager=checkpoint_manager,
-        model_size=model_size,
-        chunk_duration=settings.chunk_duration,
-        device=settings.device,
-        compute_type=settings.compute_type,
-        cpu_threads=settings.cpu_threads,
-        hf_token=settings.hf_token,
-        progress_callback=progress_callback
+        api_key=settings.mistral_api_key,
+        model=settings.voxtral_model,
+        api_timeout=settings.api_timeout,
+        progress_callback=progress_callback,
     )
 
     active_processors[job_id] = processor
@@ -187,7 +182,7 @@ async def process_job_background(
             audio_path=audio_path,
             language=language,
             enable_diarization=enable_diarization,
-            num_speakers=num_speakers
+            num_speakers=num_speakers,
         )
 
         # Save transcript to database
@@ -246,17 +241,9 @@ async def delete_job(job_id: str):
     if job_id in active_processors:
         active_processors[job_id].stop()
 
-    # Delete files
+    # Delete uploaded file
     if job.get('original_path') and os.path.exists(job['original_path']):
         os.remove(job['original_path'])
-
-    # Delete chunks
-    chunks_dir = os.path.join(settings.data_dir, 'chunks', job_id)
-    if os.path.exists(chunks_dir):
-        shutil.rmtree(chunks_dir)
-
-    # Delete checkpoint
-    checkpoint_manager.delete_checkpoint(job_id)
 
     # Delete from database
     db.delete_job(job_id)
@@ -264,25 +251,17 @@ async def delete_job(job_id: str):
     return {"message": "Job deleted"}
 
 
-@app.post("/api/jobs/{job_id}/resume", tags=["Jobs"])
-async def resume_job(job_id: str, background_tasks: BackgroundTasks):
-    """Resume a failed or interrupted job"""
+@app.post("/api/jobs/{job_id}/retry", tags=["Jobs"])
+async def retry_job(job_id: str, background_tasks: BackgroundTasks):
+    """Retry a failed job"""
     job = db.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    if job['status'] not in ('failed', 'processing', 'transcribing', 'diarizing', 'chunking'):
+    if job['status'] != 'failed':
         raise HTTPException(
             status_code=400,
-            detail=f"Cannot resume job with status '{job['status']}'"
-        )
-
-    # Check for checkpoint
-    checkpoint = checkpoint_manager.load_checkpoint(job_id)
-    if not checkpoint:
-        raise HTTPException(
-            status_code=400,
-            detail="No checkpoint found for this job"
+            detail="Only failed jobs can be retried"
         )
 
     # Check if already running
@@ -292,18 +271,17 @@ async def resume_job(job_id: str, background_tasks: BackgroundTasks):
             detail="Job is already running"
         )
 
-    # Resume processing
+    # Retry processing
     background_tasks.add_task(
         process_job_background,
         job_id=job_id,
         audio_path=job['original_path'],
         language=job.get('language'),
-        model_size=job['model_size'],
         enable_diarization=job['enable_diarization'],
         num_speakers=job.get('num_speakers')
     )
 
-    return {"message": "Job resumed", "job_id": job_id}
+    return {"message": "Job retried", "job_id": job_id}
 
 
 @app.post("/api/jobs/{job_id}/cancel", tags=["Jobs"])
@@ -422,24 +400,20 @@ async def health_check():
     return {
         "status": "healthy",
         "timestamp": datetime.utcnow().isoformat(),
-        "version": "1.0.0"
+        "version": "2.0.0"
     }
 
 
 @app.get("/api/system/status", tags=["System"])
 async def system_status():
     """Get system status including active jobs"""
-    resumable = checkpoint_manager.get_resumable_jobs()
     return {
         "active_jobs": len(active_processors),
         "active_job_ids": list(active_processors.keys()),
-        "resumable_jobs": len(resumable),
-        "resumable_job_ids": [j.job_id for j in resumable],
         "config": {
-            "model_size": settings.model_size,
-            "device": settings.device,
-            "chunk_duration": settings.chunk_duration,
-            "diarization_enabled": bool(settings.hf_token)
+            "voxtral_model": settings.voxtral_model,
+            "diarization_enabled": settings.enable_diarization,
+            "api_configured": bool(settings.mistral_api_key),
         }
     }
 
@@ -449,15 +423,9 @@ async def list_models():
     """List available models"""
     return {
         "models": [
-            {"id": "tiny", "name": "Tiny", "description": "Fastest, lowest quality"},
-            {"id": "base", "name": "Base", "description": "Fast, low quality"},
-            {"id": "small", "name": "Small", "description": "Balanced speed/quality"},
-            {"id": "medium", "name": "Medium", "description": "Good quality"},
-            {"id": "large-v1", "name": "Large V1", "description": "High quality"},
-            {"id": "large-v2", "name": "Large V2", "description": "Higher quality"},
-            {"id": "large-v3", "name": "Large V3", "description": "Best quality (default)"},
+            {"id": "voxtral-mini-latest", "name": "Voxtral Mini", "description": "Transcription rapide via Mistral AI"},
         ],
-        "default": settings.model_size
+        "default": settings.voxtral_model
     }
 
 

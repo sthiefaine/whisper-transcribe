@@ -28,7 +28,6 @@ const LANGUAGES = [
 export function UploadPanel({ onUpload, isUploading, uploadProgress }: UploadPanelProps) {
   const [options, setOptions] = useState<UploadOptions>({
     language: null,
-    model_size: 'large-v3',
     enable_diarization: true,
     num_speakers: null,
   });
@@ -70,7 +69,7 @@ export function UploadPanel({ onUpload, isUploading, uploadProgress }: UploadPan
           <div>
             <p>Drag and drop an audio file here</p>
             <p className="hint">or click to select a file</p>
-            <p className="formats">MP3, WAV, M4A, FLAC, OGG supported</p>
+            <p className="formats">MP3, WAV, M4A, FLAC, OGG supported (up to 1GB)</p>
           </div>
         )}
       </div>
@@ -93,20 +92,8 @@ export function UploadPanel({ onUpload, isUploading, uploadProgress }: UploadPan
           </label>
         </div>
 
-        <div className="option-group">
-          <label>
-            Model:
-            <select
-              value={options.model_size}
-              onChange={(e) => setOptions({ ...options, model_size: e.target.value })}
-              disabled={isUploading}
-            >
-              <option value="large-v3">Large V3 (Best quality)</option>
-              <option value="large-v2">Large V2</option>
-              <option value="medium">Medium (Faster)</option>
-              <option value="small">Small (Fastest)</option>
-            </select>
-          </label>
+        <div className="option-group info">
+          <span className="engine-badge">Voxtral Transcribe 2</span>
         </div>
 
         <div className="option-group checkbox">

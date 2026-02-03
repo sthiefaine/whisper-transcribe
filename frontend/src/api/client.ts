@@ -12,7 +12,6 @@ export async function uploadJob(
 ): Promise<{ job_id: string }> {
   const formData = new FormData();
   formData.append('file', file);
-  formData.append('model_size', options.model_size);
   formData.append('enable_diarization', String(options.enable_diarization));
   if (options.language) {
     formData.append('language', options.language);
@@ -48,8 +47,8 @@ export async function deleteJob(jobId: string): Promise<void> {
   await api.delete(`/jobs/${jobId}`);
 }
 
-export async function resumeJob(jobId: string): Promise<void> {
-  await api.post(`/jobs/${jobId}/resume`);
+export async function retryJob(jobId: string): Promise<void> {
+  await api.post(`/jobs/${jobId}/retry`);
 }
 
 export async function cancelJob(jobId: string): Promise<void> {
@@ -72,8 +71,7 @@ export async function getModels(): Promise<{ models: Model[]; default: string }>
 
 export async function getSystemStatus(): Promise<{
   active_jobs: number;
-  resumable_jobs: number;
-  resumable_job_ids: string[];
+  active_job_ids: string[];
 }> {
   const response = await api.get('/system/status');
   return response.data;

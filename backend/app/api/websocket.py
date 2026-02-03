@@ -38,16 +38,20 @@ class WebSocketManager:
         if job_id not in self.connections:
             return
 
-        message = json.dumps({
+        message_data = {
             "type": "progress",
             "job_id": progress.job_id,
             "status": progress.status,
-            "current_chunk": progress.current_chunk,
-            "total_chunks": progress.total_chunks,
             "percent_complete": progress.percent_complete,
             "current_phase": progress.current_phase,
-            "message": progress.message
-        })
+            "message": progress.message,
+        }
+
+        # Add optional fields if present
+        if progress.total_eta_seconds is not None:
+            message_data["total_eta_seconds"] = progress.total_eta_seconds
+
+        message = json.dumps(message_data)
 
         dead_connections: Set[WebSocket] = set()
 

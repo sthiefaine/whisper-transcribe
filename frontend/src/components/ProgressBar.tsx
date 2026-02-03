@@ -1,58 +1,49 @@
+import { formatTimeRemaining } from '../utils/timeFormatting';
+
 interface ProgressBarProps {
   percent: number;
   phase: string;
   message: string;
-  currentChunk: number;
-  totalChunks: number;
+  totalEta?: number;
 }
 
 const phaseLabels: Record<string, string> = {
-  chunking: 'Preparing audio...',
-  transcribing: 'Transcribing',
-  diarizing: 'Identifying speakers...',
-  merging: 'Finalizing transcript...',
-  completed: 'Complete!',
+  transcribing: 'Transcription (Voxtral)...',
+  completed: 'Terminé !',
 };
 
 export function ProgressBar({
   percent,
   phase,
   message,
-  currentChunk,
-  totalChunks,
+  totalEta,
 }: ProgressBarProps) {
-  const label =
-    phase === 'transcribing'
-      ? `${phaseLabels[phase]} (${currentChunk}/${totalChunks})`
-      : phaseLabels[phase] || phase;
+  const label = phaseLabels[phase] || phase;
+  const isIndeterminate = phase === 'transcribing' && percent > 0 && percent < 95;
 
   return (
     <div className="progress-container">
-      <div className="progress-header">
-        <span className="phase">{label}</span>
-        <span className="percent">{Math.round(percent)}%</span>
-      </div>
-
+      {/* Main progress bar */}
       <div className="progress-bar">
-        <div className="progress-fill" style={{ width: `${percent}%` }} />
+        <div
+          className={`progress-fill ${phase} ${isIndeterminate ? 'indeterminate' : ''}`}
+          style={{ width: isIndeterminate ? '100%' : `${percent}%` }}
+        />
       </div>
 
-      <div className="progress-message">{message}</div>
+      {/* Progress details row */}
+      <div className="progress-details">
+        <span className="progress-phase">{label}</span>
+        {totalEta && totalEta > 0 && (
+          <span className="progress-eta">
+            ~{formatTimeRemaining(totalEta)} restant
+          </span>
+        )}
+        <span className="progress-percent">{Math.round(percent)}%</span>
+      </div>
 
-      {phase === 'transcribing' && totalChunks > 0 && (
-        <div className="chunk-indicators">
-          {Array.from({ length: Math.min(totalChunks, 30) }, (_, i) => (
-            <div
-              key={i}
-              className={`chunk-dot ${
-                i < currentChunk ? 'completed' : i === currentChunk - 1 ? 'active' : ''
-              }`}
-              title={`Chunk ${i + 1}`}
-            />
-          ))}
-          {totalChunks > 30 && <span className="more-chunks">+{totalChunks - 30} more</span>}
-        </div>
-      )}
+      {/* Message */}
+      {message && <div className="progress-message">{message}</div>}
     </div>
   );
 }

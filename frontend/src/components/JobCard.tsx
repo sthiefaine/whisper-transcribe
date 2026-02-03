@@ -5,7 +5,7 @@ interface JobCardProps {
   job: Job;
   progress: ProgressUpdate | null;
   onView: () => void;
-  onResume: () => void;
+  onRetry: () => void;
   onCancel: () => void;
   onDelete: () => void;
 }
@@ -32,28 +32,22 @@ function formatDate(isoString: string): string {
 
 const statusColors: Record<string, string> = {
   pending: '#6b7280',
-  chunking: '#3b82f6',
   transcribing: '#3b82f6',
-  diarizing: '#8b5cf6',
-  merging: '#3b82f6',
-  processing: '#3b82f6',
   completed: '#10b981',
   failed: '#ef4444',
   cancelled: '#f59e0b',
 };
 
-export function JobCard({ job, progress, onView, onResume, onCancel, onDelete }: JobCardProps) {
-  const isProcessing = ['pending', 'chunking', 'transcribing', 'diarizing', 'merging', 'processing'].includes(
-    job.status
-  );
-  const canResume = ['failed'].includes(job.status);
+export function JobCard({ job, progress, onView, onRetry, onCancel, onDelete }: JobCardProps) {
+  const isProcessing = ['pending', 'transcribing'].includes(job.status);
+  const canRetry = job.status === 'failed';
   const canCancel = isProcessing;
 
   return (
     <div className={`job-card ${job.status}`}>
       <div className="job-header">
         <h3 className="job-filename">{job.filename}</h3>
-        <span className="job-status" style={{ backgroundColor: statusColors[job.status] }}>
+        <span className="job-status" style={{ backgroundColor: statusColors[job.status] || '#6b7280' }}>
           {job.status}
         </span>
       </div>
@@ -61,7 +55,7 @@ export function JobCard({ job, progress, onView, onResume, onCancel, onDelete }:
       <div className="job-meta">
         <span>{formatFileSize(job.file_size)}</span>
         {job.duration_seconds && <span>{formatDuration(job.duration_seconds)}</span>}
-        <span>{job.model_size}</span>
+        <span className="engine-badge-small">Voxtral</span>
         {job.enable_diarization && <span>+ Diarization</span>}
       </div>
 
@@ -75,8 +69,7 @@ export function JobCard({ job, progress, onView, onResume, onCancel, onDelete }:
           percent={progress.percent_complete}
           phase={progress.current_phase}
           message={progress.message}
-          currentChunk={progress.current_chunk}
-          totalChunks={progress.total_chunks}
+          totalEta={progress.total_eta_seconds}
         />
       )}
 
@@ -88,9 +81,9 @@ export function JobCard({ job, progress, onView, onResume, onCancel, onDelete }:
             View Transcript
           </button>
         )}
-        {canResume && (
-          <button className="btn btn-secondary" onClick={onResume}>
-            Resume
+        {canRetry && (
+          <button className="btn btn-secondary" onClick={onRetry}>
+            Retry
           </button>
         )}
         {canCancel && (

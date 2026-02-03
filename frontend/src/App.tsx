@@ -45,7 +45,7 @@ export function App() {
     <div className="app">
       <header className="header">
         <h1>Podcast Transcriber</h1>
-        <p className="subtitle">Robust transcription with checkpoint support</p>
+        <p className="subtitle">Powered by Voxtral Transcribe 2</p>
       </header>
 
       <main className="main">
@@ -66,7 +66,7 @@ export function App() {
       </main>
 
       <footer className="footer">
-        <p>Chunk-based transcription with automatic checkpoints</p>
+        <p>Transcription powered by Mistral AI</p>
       </footer>
     </div>
   );

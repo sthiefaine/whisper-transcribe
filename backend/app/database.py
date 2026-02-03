@@ -18,7 +18,7 @@ class Database:
     def _init_db(self):
         """Initialize all database tables"""
         with self.get_connection() as conn:
-            # Jobs table
+            # Jobs table (simplified - no chunk tracking)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS jobs (
                     id TEXT PRIMARY KEY,
@@ -29,14 +29,10 @@ class Database:
 
                     status TEXT NOT NULL DEFAULT 'pending',
 
-                    model_size TEXT NOT NULL DEFAULT 'large-v3',
+                    model_size TEXT NOT NULL DEFAULT 'voxtral-mini-latest',
                     language TEXT,
                     enable_diarization INTEGER NOT NULL DEFAULT 1,
                     num_speakers INTEGER,
-
-                    total_chunks INTEGER DEFAULT 0,
-                    completed_chunks INTEGER DEFAULT 0,
-                    current_chunk INTEGER DEFAULT 0,
 
                     error_message TEXT,
 
@@ -93,7 +89,7 @@ class Database:
         original_path: str,
         file_size: int,
         duration_seconds: Optional[float] = None,
-        model_size: str = "large-v3",
+        model_size: str = "voxtral-mini-latest",
         language: Optional[str] = None,
         enable_diarization: bool = True,
         num_speakers: Optional[int] = None
@@ -164,11 +160,8 @@ class Database:
         job_id: str,
         status: str,
         error_message: Optional[str] = None,
-        current_chunk: Optional[int] = None,
-        completed_chunks: Optional[int] = None,
-        total_chunks: Optional[int] = None
     ):
-        """Update job status and progress"""
+        """Update job status"""
         now = datetime.utcnow().isoformat()
 
         updates = ["status = ?", "updated_at = ?"]
@@ -178,19 +171,7 @@ class Database:
             updates.append("error_message = ?")
             params.append(error_message)
 
-        if current_chunk is not None:
-            updates.append("current_chunk = ?")
-            params.append(current_chunk)
-
-        if completed_chunks is not None:
-            updates.append("completed_chunks = ?")
-            params.append(completed_chunks)
-
-        if total_chunks is not None:
-            updates.append("total_chunks = ?")
-            params.append(total_chunks)
-
-        if status in ('transcribing', 'chunking'):
+        if status == 'transcribing':
             updates.append("started_at = COALESCE(started_at, ?)")
             params.append(now)
 

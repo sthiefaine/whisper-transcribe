@@ -1,29 +1,25 @@
 # Podcast Transcriber
 
-Système de transcription robuste pour podcasts longs (1h30-2h+) avec support des checkpoints et reprise après crash.
+Transcription de podcasts via l'API Voxtral Transcribe 2 de Mistral AI.
 
 ## Fonctionnalités
 
-- **Transcription par chunks**: Découpe l'audio en segments de 5 minutes, traités individuellement
-- **Checkpoints automatiques**: Sauvegarde après chaque chunk, reprise possible après crash/restart
-- **Speaker Diarization**: Identification des différents speakers (pyannote-audio)
-- **Modèle Whisper large-v3**: Meilleure qualité de transcription disponible
+- **Voxtral Transcribe 2**: API de transcription haute qualité de Mistral AI
+- **Speaker Diarization**: Identification des speakers (intégré dans Voxtral)
 - **Interface web**: Upload, suivi du progrès en temps réel, visualisation du transcript
 - **Export multiple**: TXT, SRT, VTT, JSON
+- **Fichiers jusqu'à 1GB**: Podcasts longs supportés
 
-## Pourquoi ce projet ?
+## Tarification
 
-Sur un petit serveur (Hetzner CCX23), transcrire un podcast de 2h avec Whisper large-v3 peut prendre 24-32h. Les solutions existantes comme Scriberr échouent car le processus est tué après quelques heures.
-
-Cette solution découpe l'audio en chunks et sauvegarde le progrès après chaque chunk. Si le serveur redémarre ou le processus crash, la transcription reprend au dernier chunk terminé.
+Voxtral Transcribe 2 coûte **$0.003/minute** (~$0.36 pour un podcast de 2h).
 
 ## Installation
 
 ### Prérequis
 
 - Docker & Docker Compose
-- Token HuggingFace (pour la diarization) - [Obtenir un token](https://huggingface.co/settings/tokens)
-- Accepter les conditions pyannote: https://huggingface.co/pyannote/speaker-diarization-3.1
+- Clé API Mistral - [Obtenir une clé](https://console.mistral.ai/api-keys)
 
 ### Configuration
 
@@ -31,7 +27,7 @@ Cette solution découpe l'audio en chunks et sauvegarde le progrès après chaqu
 # Copier le fichier d'exemple
 cp env.example .env
 
-# Éditer .env et ajouter votre HF_TOKEN
+# Éditer .env et ajouter votre MISTRAL_API_KEY
 nano .env
 ```
 
@@ -45,7 +41,7 @@ docker-compose up -d --build
 docker-compose logs -f backend
 ```
 
-L'interface est accessible sur http://localhost:8080
+L'interface est accessible sur http://localhost:8085
 
 ### Déploiement Coolify
 
@@ -66,10 +62,10 @@ docker-compose -f docker-compose.coolify.yml up -d --build
                              │ REST + WebSocket
 ┌────────────────────────────▼────────────────────────────────┐
 │                   Backend (FastAPI)                         │
-│  ┌──────────────┐  ┌───────────────┐  ┌─────────────────┐  │
-│  │ Job Manager  │  │ Chunk Processor│  │ Checkpoint Mgr  │  │
-│  │   (SQLite)   │  │(faster-whisper)│  │   (SQLite)      │  │
-│  └──────────────┘  └───────────────┘  └─────────────────┘  │
+│  ┌──────────────┐  ┌───────────────────────────────────┐   │
+│  │ Job Manager  │  │     Voxtral Transcriber           │   │
+│  │   (SQLite)   │  │   (Mistral AI API Client)         │   │
+│  └──────────────┘  └───────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -80,7 +76,7 @@ docker-compose -f docker-compose.coolify.yml up -d --build
 | POST | /api/jobs | Upload audio + créer job |
 | GET | /api/jobs | Liste des jobs |
 | GET | /api/jobs/{id} | Détails d'un job |
-| POST | /api/jobs/{id}/resume | Reprendre un job |
+| POST | /api/jobs/{id}/retry | Réessayer un job échoué |
 | POST | /api/jobs/{id}/cancel | Annuler un job |
 | DELETE | /api/jobs/{id} | Supprimer un job |
 | GET | /api/jobs/{id}/transcript | Récupérer le transcript |
@@ -93,23 +89,19 @@ Variables d'environnement:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| HF_TOKEN | - | Token HuggingFace (requis pour diarization) |
-| MODEL_SIZE | large-v3 | Modèle Whisper |
-| DEVICE | cpu | cpu ou cuda |
-| COMPUTE_TYPE | int8 | int8 (CPU) ou float16 (GPU) |
-| CHUNK_DURATION | 300 | Durée chunk en secondes |
-| CPU_THREADS | 4 | Threads CPU |
+| MISTRAL_API_KEY | - | Clé API Mistral (requis) |
+| VOXTRAL_MODEL | voxtral-mini-latest | Modèle Voxtral |
+| ENABLE_DIARIZATION | true | Activer identification speakers |
+| API_TIMEOUT | 3600 | Timeout API en secondes |
+| MAX_FILE_SIZE | 1073741824 | Taille max fichier (1GB) |
 
-## Temps estimés (podcast 2h sur CCX23)
+## Temps estimés
 
-| Phase | Durée | RAM |
-|-------|-------|-----|
-| Chunking | 2-3 min | ~500MB |
-| Transcription | 20-30h | ~4GB |
-| Diarization | 30-60 min | ~3GB |
-| **Total** | **~24-32h** | **4GB max** |
-
-Mais contrairement aux autres solutions, si le processus crash, il reprend là où il s'est arrêté !
+| Durée podcast | Temps transcription | Coût |
+|---------------|---------------------|------|
+| 30 min | ~1-2 min | ~$0.09 |
+| 1h | ~2-3 min | ~$0.18 |
+| 2h | ~5-10 min | ~$0.36 |
 
 ## Développement
 
@@ -134,10 +126,7 @@ backend/
 │   ├── config.py            # Configuration
 │   ├── database.py          # SQLite models
 │   └── services/
-│       ├── audio_chunker.py # FFmpeg splitting
-│       ├── transcriber.py   # faster-whisper
-│       ├── diarizer.py      # pyannote-audio
-│       ├── checkpoint.py    # Checkpoint manager
+│       ├── transcriber.py   # Voxtral API client
 │       └── job_processor.py # Orchestration
 
 frontend/

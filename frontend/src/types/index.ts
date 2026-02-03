@@ -4,14 +4,11 @@ export interface Job {
   original_path: string;
   file_size: number;
   duration_seconds: number | null;
-  status: 'pending' | 'chunking' | 'transcribing' | 'diarizing' | 'merging' | 'completed' | 'failed' | 'cancelled' | 'processing';
+  status: 'pending' | 'transcribing' | 'completed' | 'failed' | 'cancelled';
   model_size: string;
   language: string | null;
   enable_diarization: boolean;
   num_speakers: number | null;
-  total_chunks: number;
-  completed_chunks: number;
-  current_chunk: number;
   error_message: string | null;
   created_at: string;
   started_at: string | null;
@@ -46,16 +43,14 @@ export interface ProgressUpdate {
   type: 'progress';
   job_id: string;
   status: string;
-  current_chunk: number;
-  total_chunks: number;
   percent_complete: number;
   current_phase: string;
   message: string;
+  total_eta_seconds?: number;
 }
 
 export interface UploadOptions {
   language: string | null;
-  model_size: string;
   enable_diarization: boolean;
   num_speakers: number | null;
 }

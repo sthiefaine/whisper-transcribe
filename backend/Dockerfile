@@ -1,18 +1,9 @@
 FROM python:3.10-slim
 
-# Install system dependencies
+# Install minimal system dependencies (ffprobe for duration detection)
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     curl \
-    build-essential \
-    pkg-config \
-    libavformat-dev \
-    libavcodec-dev \
-    libavdevice-dev \
-    libavutil-dev \
-    libswscale-dev \
-    libswresample-dev \
-    libavfilter-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -25,18 +16,17 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app/ ./app/
 
 # Create data directories
-RUN mkdir -p /app/data/uploads /app/data/chunks /app/data/db
+RUN mkdir -p /app/data/uploads /app/data/db
 
 # Environment variables
 ENV PYTHONUNBUFFERED=1
 ENV DATA_DIR=/app/data
 ENV DB_PATH=/app/data/db/jobs.db
-ENV CHECKPOINT_DB_PATH=/app/data/db/checkpoints.db
 
 EXPOSE 8000
 
 # Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=300s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
 # Run with uvicorn

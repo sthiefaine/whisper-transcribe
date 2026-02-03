@@ -146,64 +146,229 @@ body {
   height: 1.2rem;
 }
 
-/* Progress Bar */
-.progress-container {
-  margin: 1rem 0;
+.option-group.info {
+  justify-content: center;
 }
 
-.progress-header {
+.engine-badge {
+  display: inline-block;
+  padding: 0.35rem 0.75rem;
+  background: linear-gradient(135deg, #3b82f6, #2563eb);
+  color: white;
+  font-size: 0.85rem;
+  font-weight: 500;
+  border-radius: 9999px;
+}
+
+.engine-badge-small {
+  font-size: 0.75rem;
+  padding: 0.15rem 0.5rem;
+  background: var(--accent);
+  color: white;
+  border-radius: 4px;
+}
+
+/* Progress Bar */
+.progress-container {
+  margin: 1.5rem 0;
+  padding: 1rem;
+  background: var(--bg-tertiary);
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+/* Phase Step Indicator */
+.phase-steps {
   display: flex;
   justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 1.5rem;
+  position: relative;
+}
+
+.phase-step {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  flex: 1;
+  position: relative;
+  z-index: 1;
+}
+
+.phase-step-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: bold;
+  font-size: 1rem;
+  transition: all 0.3s ease;
   margin-bottom: 0.5rem;
 }
 
-.phase {
+.phase-step.pending .phase-step-icon {
+  background: var(--bg-secondary);
+  border: 2px solid rgba(255, 255, 255, 0.2);
+  color: var(--text-secondary);
+}
+
+.phase-step.active .phase-step-icon {
+  background: var(--accent);
+  border: 2px solid var(--accent);
+  color: white;
+  box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.2);
+}
+
+.phase-step.completed .phase-step-icon {
+  background: var(--success);
+  border: 2px solid var(--success);
+  color: white;
+}
+
+.phase-step-label {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+.phase-step.active .phase-step-label {
+  color: var(--accent);
   font-weight: 500;
 }
 
-.percent {
-  color: var(--accent);
+.phase-step.completed .phase-step-label {
+  color: var(--success);
 }
 
+.phase-step-connector {
+  position: absolute;
+  top: 20px;
+  left: 50%;
+  right: -50%;
+  height: 2px;
+  background: rgba(255, 255, 255, 0.2);
+  z-index: 0;
+}
+
+.phase-step-connector.completed {
+  background: var(--success);
+}
+
+/* Progress Bar */
 .progress-bar {
-  height: 8px;
-  background: var(--bg-tertiary);
-  border-radius: 4px;
+  height: 20px;
+  background: var(--bg-secondary);
+  border-radius: 10px;
   overflow: hidden;
+  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.3);
+  margin-bottom: 0.75rem;
 }
 
 .progress-fill {
   height: 100%;
-  background: var(--accent);
-  transition: width 0.3s ease;
+  background: linear-gradient(90deg, var(--accent), var(--accent));
+  transition: width 0.5s ease;
+  position: relative;
 }
 
-.progress-message {
-  margin-top: 0.5rem;
-  color: var(--text-secondary);
+.progress-fill.transcribing {
+  background: linear-gradient(90deg, #3b82f6, #2563eb);
+}
+
+.progress-fill.indeterminate {
+  background: linear-gradient(90deg, #1e293b, #3b82f6, #1e293b);
+  background-size: 200% 100%;
+  animation: indeterminate 2s linear infinite;
+}
+
+@keyframes indeterminate {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: -100% 0;
+  }
+}
+
+.progress-fill.completed {
+  background: linear-gradient(90deg, #10b981, #059669);
+}
+
+/* Progress Details Row */
+.progress-details {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.5rem;
+  font-size: 0.95rem;
+}
+
+.progress-phase {
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.progress-eta {
+  color: var(--accent);
+  font-weight: 500;
   font-size: 0.9rem;
 }
 
+.progress-percent {
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+/* Phase-specific Details */
+.phase-details {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.phase-info {
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  margin-bottom: 0.5rem;
+}
+
+.avg-time {
+  opacity: 0.7;
+}
+
+.progress-message {
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  font-style: italic;
+  margin-top: 0.5rem;
+}
+
+/* Chunk Indicators */
 .chunk-indicators {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
-  margin-top: 0.5rem;
+  margin-top: 0.75rem;
 }
 
 .chunk-dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--bg-tertiary);
+  background: var(--bg-secondary);
+  border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
 .chunk-dot.completed {
   background: var(--success);
+  border-color: var(--success);
 }
 
 .chunk-dot.active {
   background: var(--accent);
+  border-color: var(--accent);
   animation: pulse 1s infinite;
 }
 
@@ -217,9 +382,11 @@ body {
   0%,
   100% {
     opacity: 1;
+    transform: scale(1);
   }
   50% {
-    opacity: 0.5;
+    opacity: 0.6;
+    transform: scale(1.2);
   }
 }
 
