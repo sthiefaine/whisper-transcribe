@@ -1,287 +1,156 @@
-# Scriberr - Service de Transcription Audio
+# Podcast Transcriber
 
-Service de transcription audio moderne utilisant Scriberr (WhisperX optimisé) pour gérer les longs podcasts sans problème. Optimisé pour les serveurs Linux/Hetzner avec Coolify.
+Système de transcription robuste pour podcasts longs (1h30-2h+) avec support des checkpoints et reprise après crash.
 
-## 🚀 Fonctionnalités
+## Fonctionnalités
 
-- ✅ Transcription de longs podcasts (optimisé WhisperX)
-- ✅ Diarisation (identification des locuteurs) avec HuggingFace
-- ✅ Interface web moderne
-- ✅ API REST complète
-- ✅ Support GPU NVIDIA (optionnel)
-- ✅ Déploiement Docker Compose simple
-- ✅ Prêt pour Coolify/Hetzner
+- **Transcription par chunks**: Découpe l'audio en segments de 5 minutes, traités individuellement
+- **Checkpoints automatiques**: Sauvegarde après chaque chunk, reprise possible après crash/restart
+- **Speaker Diarization**: Identification des différents speakers (pyannote-audio)
+- **Modèle Whisper large-v3**: Meilleure qualité de transcription disponible
+- **Interface web**: Upload, suivi du progrès en temps réel, visualisation du transcript
+- **Export multiple**: TXT, SRT, VTT, JSON
 
-## 📋 Prérequis
+## Pourquoi ce projet ?
 
-- Docker et Docker Compose installés
-- Serveur Linux (Ubuntu/Debian recommandé)
-- Optionnel : Token HuggingFace pour la diarisation (gratuit)
+Sur un petit serveur (Hetzner CCX23), transcrire un podcast de 2h avec Whisper large-v3 peut prendre 24-32h. Les solutions existantes comme Scriberr échouent car le processus est tué après quelques heures.
 
-## 🔧 Installation Rapide
+Cette solution découpe l'audio en chunks et sauvegarde le progrès après chaque chunk. Si le serveur redémarre ou le processus crash, la transcription reprend au dernier chunk terminé.
 
-### Étape 1 : Préparation du serveur
+## Installation
+
+### Prérequis
+
+- Docker & Docker Compose
+- Token HuggingFace (pour la diarization) - [Obtenir un token](https://huggingface.co/settings/tokens)
+- Accepter les conditions pyannote: https://huggingface.co/pyannote/speaker-diarization-3.1
+
+### Configuration
 
 ```bash
-# Vérifier Docker
-docker --version
-docker-compose --version
+# Copier le fichier d'exemple
+cp env.example .env
 
-# Cloner ou naviguer vers le projet
-cd ~/scriberr  # ou votre répertoire
-```
-
-### Étape 2 : Configuration
-
-1. **Copier le fichier d'environnement :**
-```bash
-cp .env.example .env
-```
-
-2. **Éditer `.env` et ajouter votre token HuggingFace (optionnel mais recommandé) :**
-```bash
+# Éditer .env et ajouter votre HF_TOKEN
 nano .env
 ```
 
-Obtenez votre token gratuit sur [HuggingFace Settings](https://huggingface.co/settings/tokens)
-
-### Étape 3 : Déploiement
+### Lancement
 
 ```bash
-# Rendre le script exécutable (si pas déjà fait)
-chmod +x deploy.sh
-
-# Démarrer Scriberr
-./deploy.sh up
-```
-
-### Étape 4 : Accès
-
-Accédez à l'interface web :
-- **Local** : http://localhost:8080
-- **Serveur distant** : http://VOTRE_IP:8080
-
-## 📖 Utilisation
-
-### Interface Web
-
-1. Ouvrez http://VOTRE_IP:8080 dans votre navigateur
-2. Uploadez votre fichier audio (MP3, WAV, M4A, etc.)
-3. Configurez les options (langue, diarisation, etc.)
-4. Lancez la transcription
-5. Téléchargez le résultat (TXT, SRT, VTT)
-
-### API REST
-
-#### Transcription simple
-
-```bash
-curl -X POST http://VOTRE_IP:8080/api/transcribe \
-  -H "Content-Type: multipart/form-data" \
-  -F "file=@votre_audio.mp3" \
-  -F "language=fr" \
-  -F "diarize=true"
-```
-
-#### Transcription avec diarisation
-
-```bash
-curl -X POST http://VOTRE_IP:8080/api/transcribe \
-  -H "Content-Type: multipart/form-data" \
-  -F "file=@podcast.mp3" \
-  -F "language=fr" \
-  -F "diarize=true" \
-  -F "num_speakers=2"
-```
-
-## 🐳 Déploiement avec Coolify
-
-### Méthode 1 : Docker Compose dans Coolify
-
-1. **Dans Coolify Dashboard :**
-   - New Service > Docker Compose
-   - Upload votre `docker-compose.yml`
-
-2. **Variables d'environnement :**
-   - Ajoutez `HF_TOKEN` si vous utilisez la diarisation
-   - Coolify gère automatiquement le routing (pas besoin de configurer le port)
-
-3. **Important :** 
-   - Le port n'est pas mappé dans docker-compose.yml (Coolify gère via Traefik)
-   - Si vous avez un conflit de port, arrêtez l'ancien service Whisper d'abord
-
-4. **Déployer :**
-   - Cliquez sur Deploy
-   - Attendez que le healthcheck passe (40s max)
-   - Accédez via le domaine configuré dans Coolify
-
-### Méthode 2 : Script de déploiement
-
-```bash
-# Sur votre serveur
-./deploy.sh up
-```
-
-## 🛠️ Commandes Utiles
-
-### Gestion du service
-
-```bash
-# Démarrer
-./deploy.sh up
-
-# Arrêter
-./deploy.sh down
+# Build et démarrage
+docker-compose up -d --build
 
 # Voir les logs
-./deploy.sh logs
-
-# Sauvegarder les données
-./deploy.sh backup
-
-# Restaurer depuis une sauvegarde
-./deploy.sh restore ./backups/scriberr_backup_20240101_120000.tar.gz
+docker-compose logs -f backend
 ```
 
-### Commandes Docker directes
+L'interface est accessible sur http://localhost:8080
+
+### Déploiement Coolify
+
+Pour déployer sur Coolify/Hetzner:
 
 ```bash
-# Voir les logs
-docker-compose logs -f
-
-# Redémarrer
-docker-compose restart
-
-# Voir le statut
-docker-compose ps
-
-# Accéder au conteneur
-docker exec -it scriberr sh
+# Utiliser la configuration Coolify
+docker-compose -f docker-compose.coolify.yml up -d --build
 ```
 
-## 📁 Structure des Données
+## Architecture
 
 ```
-.
-├── docker-compose.yml    # Configuration Docker Compose
-├── .env                  # Variables d'environnement (à créer)
-├── .env.example          # Exemple de configuration
-├── deploy.sh             # Script de déploiement
-├── data/                 # Données persistantes
-│   ├── scriberr.db      # Base de données
-│   └── uploads/         # Fichiers uploadés
-└── backups/              # Sauvegardes (créé automatiquement)
+┌─────────────────────────────────────────────────────────────┐
+│                    Frontend (React/Vite)                    │
+│  Upload | Jobs List | Progress Bar | Transcript Viewer      │
+└────────────────────────────┬────────────────────────────────┘
+                             │ REST + WebSocket
+┌────────────────────────────▼────────────────────────────────┐
+│                   Backend (FastAPI)                         │
+│  ┌──────────────┐  ┌───────────────┐  ┌─────────────────┐  │
+│  │ Job Manager  │  │ Chunk Processor│  │ Checkpoint Mgr  │  │
+│  │   (SQLite)   │  │(faster-whisper)│  │   (SQLite)      │  │
+│  └──────────────┘  └───────────────┘  └─────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-## ⚙️ Configuration Avancée
+## API Endpoints
 
-### Support GPU NVIDIA
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | /api/jobs | Upload audio + créer job |
+| GET | /api/jobs | Liste des jobs |
+| GET | /api/jobs/{id} | Détails d'un job |
+| POST | /api/jobs/{id}/resume | Reprendre un job |
+| POST | /api/jobs/{id}/cancel | Annuler un job |
+| DELETE | /api/jobs/{id} | Supprimer un job |
+| GET | /api/jobs/{id}/transcript | Récupérer le transcript |
+| GET | /api/jobs/{id}/transcript/download?format=srt | Télécharger |
+| WS | /ws/progress/{id} | Progress temps réel |
 
-Pour activer le support GPU, décommentez la section dans `docker-compose.yml` :
+## Configuration
 
-```yaml
-deploy:
-  resources:
-    reservations:
-      devices:
-        - driver: nvidia
-          count: 1
-          capabilities: [gpu]
-```
+Variables d'environnement:
 
-**Prérequis :**
-- NVIDIA Docker runtime installé
-- GPU compatible CUDA
+| Variable | Default | Description |
+|----------|---------|-------------|
+| HF_TOKEN | - | Token HuggingFace (requis pour diarization) |
+| MODEL_SIZE | large-v3 | Modèle Whisper |
+| DEVICE | cpu | cpu ou cuda |
+| COMPUTE_TYPE | int8 | int8 (CPU) ou float16 (GPU) |
+| CHUNK_DURATION | 300 | Durée chunk en secondes |
+| CPU_THREADS | 4 | Threads CPU |
 
-### Variables d'environnement
+## Temps estimés (podcast 2h sur CCX23)
 
-| Variable | Description | Défaut |
-|----------|-------------|--------|
-| `HF_TOKEN` | Token HuggingFace pour diarisation | (vide) |
-| `PORT` | Port d'écoute | `8080` |
-| `DB_PATH` | Chemin de la base de données | `/app/data/scriberr.db` |
-| `UPLOAD_DIR` | Répertoire d'upload | `/app/data/uploads` |
+| Phase | Durée | RAM |
+|-------|-------|-----|
+| Chunking | 2-3 min | ~500MB |
+| Transcription | 20-30h | ~4GB |
+| Diarization | 30-60 min | ~3GB |
+| **Total** | **~24-32h** | **4GB max** |
 
-## 🔒 Sécurité
+Mais contrairement aux autres solutions, si le processus crash, il reprend là où il s'est arrêté !
 
-- Les fichiers uploadés sont stockés localement dans `./data/uploads`
-- La base de données est dans `./data/scriberr.db`
-- Configurez un reverse proxy (Nginx/Traefik) pour HTTPS en production
-- Utilisez des variables d'environnement pour les tokens sensibles
-
-## 🐛 Dépannage
-
-### Le service ne démarre pas
+## Développement
 
 ```bash
-# Vérifier les logs
-./deploy.sh logs
+# Backend
+cd backend
+pip install -r requirements.txt
+uvicorn app.main:app --reload
 
-# Vérifier les ports
-netstat -tulpn | grep 8080
-
-# Vérifier Docker
-docker ps -a
+# Frontend
+cd frontend
+npm install
+npm run dev
 ```
 
-### Erreur de diarisation
+## Structure
 
-- Vérifiez que `HF_TOKEN` est correctement configuré dans `.env`
-- Vérifiez que le token est valide sur HuggingFace
-- La diarisation fonctionne sans token mais avec des limitations
+```
+backend/
+├── app/
+│   ├── main.py              # FastAPI endpoints
+│   ├── config.py            # Configuration
+│   ├── database.py          # SQLite models
+│   └── services/
+│       ├── audio_chunker.py # FFmpeg splitting
+│       ├── transcriber.py   # faster-whisper
+│       ├── diarizer.py      # pyannote-audio
+│       ├── checkpoint.py    # Checkpoint manager
+│       └── job_processor.py # Orchestration
 
-### Problèmes de mémoire
-
-- Scriberr est optimisé pour les longs fichiers
-- Si problèmes, augmentez la RAM allouée à Docker
-- Considérez l'utilisation d'un GPU pour de meilleures performances
-
-## 📊 Performance
-
-- **CPU** : Transcription en temps réel × 0.5-1x (selon modèle)
-- **RAM** : ~2-4GB pour les fichiers moyens
-- **GPU** : Accélération significative si disponible
-- **Longs podcasts** : Optimisé pour fichiers >1h
-
-## 🔄 Migration depuis Whisper
-
-Si vous migrez depuis un ancien service Whisper :
-
-1. **Sauvegardez vos données :**
-```bash
-# Depuis l'ancien projet
-tar -czf whisper_backup.tar.gz ./logs ./models
+frontend/
+├── src/
+│   ├── components/
+│   │   ├── UploadPanel.tsx
+│   │   ├── JobList.tsx
+│   │   ├── ProgressBar.tsx
+│   │   └── TranscriptViewer.tsx
+│   └── hooks/
+│       └── useWebSocket.ts
 ```
 
-2. **Déployez Scriberr :**
-```bash
-./deploy.sh up
-```
+## License
 
-3. **Migrez les transcriptions (optionnel) :**
-   - Utilisez l'API Scriberr pour re-transcrire si nécessaire
-   - Les anciens fichiers peuvent être uploadés via l'interface web
-
-## 📚 Ressources
-
-- [Scriberr GitHub](https://github.com/rishikanthc/scriberr)
-- [WhisperX Documentation](https://github.com/m-bain/whisperX)
-- [HuggingFace Tokens](https://huggingface.co/settings/tokens)
-
-## 📝 Notes
-
-- Les données sont persistantes dans `./data/`
-- Faites des sauvegardes régulières avec `./deploy.sh backup`
-- Le healthcheck vérifie `/health` toutes les 30s
-- Le service redémarre automatiquement en cas d'erreur
-
-## 🆘 Support
-
-Pour toute question ou problème :
-1. Vérifiez les logs : `./deploy.sh logs`
-2. Consultez la documentation Scriberr
-3. Vérifiez les issues GitHub du projet
-
----
-
-**Fait avec ❤️ pour les longs podcasts**
+MIT

@@ -1,10 +1,15 @@
 version: '3.8'
 
+# Configuration pour déploiement Coolify/Hetzner
+# Utilise le réseau Coolify pour le routing Traefik
+
 services:
   backend:
     build:
       context: ./backend
     container_name: transcriber-backend
+    expose:
+      - "8000"
     environment:
       - DATA_DIR=/app/data
       - DB_PATH=/app/data/db/jobs.db
@@ -18,7 +23,7 @@ services:
     volumes:
       - ./data:/app/data
       - model-cache:/root/.cache/huggingface
-    restart: unless-stopped
+    restart: always
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
@@ -32,24 +37,25 @@ services:
         reservations:
           memory: 4G
     networks:
-      - transcriber-net
+      - coolify
+    stop_grace_period: 120s
 
   frontend:
     build:
       context: ./frontend
     container_name: transcriber-frontend
-    ports:
-      - "8080:80"
+    expose:
+      - "80"
     depends_on:
       - backend
-    restart: unless-stopped
+    restart: always
     networks:
-      - transcriber-net
+      - coolify
 
 volumes:
   model-cache:
     driver: local
 
 networks:
-  transcriber-net:
-    driver: bridge
+  coolify:
+    external: true
