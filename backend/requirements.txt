@@ -14,6 +14,9 @@ torchaudio>=2.0.0
 # Speaker diarization
 pyannote.audio>=3.1.0
 
+# PyAV (explicit version for FFmpeg 7.x compatibility in Debian bookworm)
+av>=13.0.0
+
 # Utilities
 python-dotenv==1.0.0
 
