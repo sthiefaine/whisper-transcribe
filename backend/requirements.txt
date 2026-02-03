@@ -5,7 +5,7 @@ python-multipart==0.0.6
 websockets==12.0
 
 # Whisper transcription
-faster-whisper==1.0.0
+faster-whisper>=1.2.0
 
 # PyTorch (CPU version for smaller image)
 torch>=2.0.0
@@ -13,9 +13,6 @@ torchaudio>=2.0.0
 
 # Speaker diarization
 pyannote.audio>=3.1.0
-
-# PyAV (explicit version for FFmpeg 7.x compatibility in Debian bookworm)
-av>=13.0.0
 
 # Utilities
 python-dotenv==1.0.0
